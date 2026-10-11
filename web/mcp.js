@@ -163,8 +163,9 @@
           }
           else line.append(node('h4',item.term),node('p',item.meaning||'还需观察用法，暂不作为确定释义'),node('small',!item.enabled?'已停用':item.manual?'人工释义':item.is_jargon?'已掌握':'待观察','mcp-muted'));
           const toggle=node('button',item.enabled?'停用此条':'启用此条');toggle.type='button';toggle.onclick=()=>change({kind,id:item.id,enabled:!item.enabled});line.append(toggle);
-          const details=node('details','');details.append(node('summary','检查详情'),node('p',`有效批次命中 ${item.count} · 上下文独立性 ${item.independence}`));
+          const details=node('details','');details.append(node('summary','检查详情'),node('p',`有效批次命中 ${item.count} · ${item.independence==='manual'?'人工确认':'顺序自检，非独立核验'}`));
           if(kind==='jargon'){
+            details.append(node('p',item.last_inference_count?`最近释义检查：第 ${item.last_inference_count} 次命中。`:'尚未进行释义检查，首次需要 4 个有效批次命中。','mcp-muted'));
             const meaning=node('textarea',''),save=node('button','保存人工释义');meaning.value=item.meaning||'';meaning.maxLength=600;meaning.setAttribute('aria-label',item.term+' 的人工释义');save.type='button';save.onclick=()=>change({kind,id:item.id,meaning:meaning.value});details.append(meaning,save);
           }
           line.append(details);section.append(line);

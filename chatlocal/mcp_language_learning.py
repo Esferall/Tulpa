@@ -18,6 +18,7 @@ def schemas(tool):
              dict(**common,records=dict(type='boolean')),['session_id']),
         tool('claim_chat_learning','wait_chat_messages 返回 learning_ready 时按 next_call 自动领取一个阶段。一次只做一个阶段，提交后必须回到 wait，潜水也继续循环。程序不调用模型。'
              '当前 Agent 另一次模型调用完成该阶段，再 submit。每阶段不同 invocation_id。只学习群友实际用语，绝不能总结自己的回复或人格规则；严格逐字证据与语言形式校验。'
+             '表达 extract/review 与黑话 extract_jargon 是独立任务，按领取的 result_schema 提交；黑话解释证据不足会提前结束。'
              '顺序上下文一律 degraded，不得假装独立；换账号/群必须新建 MCP 连接及宿主会话。',
              dict(**common,context_id=dict(type='string',minLength=8,maxLength=100,description='可省略，服务端使用本会话绑定的上下文标识。'),wake_id=dict(type='string',minLength=64,maxLength=64)),['session_id']),
         tool('submit_chat_learning','提交已领取阶段的结构化模型结果或一次失败。重试原 lease 和结果幂等；'
@@ -43,6 +44,9 @@ ERRORS={
  'separate_model_call_required':'提取、审核及释义阶段必须分别调用模型，不能复用 invocation_id。',
  'idempotency_conflict':'同一已完成请求不能换结果或换选择。',
  'invalid_result':'结果字段、数量或长度不符合当前阶段要求。请按 result_schema 提交，不编造来源。',
+ 'jargon_separate_stage_required':'表达提取不再附带黑话。此阶段只提交 expressions；回到 wait 后会自动领取独立黑话任务。',
+ 'jargon_evidence_required':'黑话需真实群友证据。按本阶段 result_schema 提交原文引用、来源和语境理由；不能沿用旧版两字段词条。',
+ 'jargon_invalid_candidate':'该条不是合格黑话候选：排除普通词、人名、命令、纯符号及无法证明依赖群内语境的内容，不确定则不收录。',
  'expression_evidence_required':'表达须含 evidence_quote、surface_form、form_type。只观察群友实际说法，不总结自己的回应策略；按本阶段新协议提交。',
  'expression_quote_mismatch':'引用必须逐字来自指定群友原话，自检须复核同一引用；不能用自己的回复或另一个来源补足。',
  'invalid_expression_count':'expressions 只能为空数组，或包含3–5条有充分原话依据的表达；不能为凑数编造。',

@@ -95,12 +95,17 @@ def main():
                                 read=call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,acknowledge_through_id=read['read_through_id'])
                             return read
                         ids=[m['source_id'] for m in t['material']['messages']]
-                        result=dict(expressions=[expression_fixture(t['material']['messages'][i],'情境'+str(i),'抽象方式'+str(i)) for i in range(3)],jargon=[dict(term='云朵开机',source_id=ids[0])])
+                        result=dict(expressions=[expression_fixture(t['material']['messages'][i],'情境'+str(i),'抽象方式'+str(i)) for i in range(3)])
                         bad=json.loads(json.dumps(result));bad['expressions'][1]['surface_form']='{全部内容}'
                         error=submit(t,bad,'failed-field-check')
                         assert error['field']=='expressions[1].surface_form' and error['error_code']=='invalid_expression_form'
                         assert '全部内容' not in json.dumps(error,ensure_ascii=False)
                         assert submit(t,result,'actual-call-1')['state']=='stage_completed'
+                        assert resume_wait()['event']=='learning_ready'
+                        t=call('claim_chat_learning',session_id=sid,context_id='new-host-context')['task']
+                        assert t['stage']=='extract_jargon' and t['context_verification']['isolated'] is False
+                        from check_mcp_language_learning import jargon_fixture
+                        assert submit(t,jargon_fixture(t),'actual-jargon-call')['state']=='completed'
                         assert resume_wait()['event']=='learning_ready'
                         t=call('claim_chat_learning',session_id=sid,context_id='new-host-context')['task']
                         assert t['stage']=='review'
@@ -131,7 +136,7 @@ def main():
                     call('stop_chat_session',session_id=sid)
                     assert call('get_chat_learning',session_id=sid).get('expression_count') is None
                     print(json.dumps(dict(status='passed',transport='MCP HTTP + loopback WS',observations=10,
-                        model_calls='2 simulated separate invocations',historical_db_reads=0,external_writes=0,
+                        model_calls='3 simulated separate invocations',historical_db_reads=0,external_writes=0,
                         checks=['scope and grant pin','API opt-in and CSRF','SELF/history/synthetic/foreign filter','extract-review-persist',
                                 'default self-check usable with 10-expression threshold','tool discovery','disable record','disconnect/stop late result rejected']),ensure_ascii=False))
     finally:

@@ -18,7 +18,7 @@ from unittest.mock import patch
 
 sys.path.insert(0,str(Path(__file__).parent))
 from check_mcp_reactions import ReactionBot,Events,ROOT
-from check_mcp_language_learning import Clock,expression_fixture,review_fixture,ground_fixture_rows
+from check_mcp_language_learning import Clock,expression_fixture,review_fixture,ground_fixture_rows,jargon_fixture
 from chatlocal.store import Store
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.mcp_language_store import LanguageStore,LearningError
@@ -62,6 +62,8 @@ def migration():
         t=next(t for t in claims if t)
         failed=store.submit(b,t['job_id'],t['lease'],'fake-failure',failure='timeout')
         assert store.submit(b,t['job_id'],t['lease'],'fake-failure',failure='timeout')['already_recorded']
+        independent=store.claim(b,'context-a');assert independent['stage']=='extract_jargon'
+        store.submit(b,independent['job_id'],independent['lease'],'independent-jargon',dict(jargon=[]))
         assert store.readiness(b)['reason']=='retry_cooldown'
         clock.advance(15);new_wake=store.readiness(b);assert new_wake['ready'] and new_wake['wake_id']!=wake['wake_id']
         assert not store.claim(b,'context-a',wake_id=wake['wake_id'])
@@ -145,11 +147,14 @@ def main():
                     # Model works on one stage while a fresh message arrives.
                     receive(1,500)
                     ids=[m['source_id'] for m in t['material']['messages']]
-                    result=dict(expressions=[expression_fixture(t['material']['messages'][i],'情境'+str(i),'方式'+str(i)) for i in range(3)],jargon=[dict(term='云朵开机',source_id=ids[0])])
+                    result=dict(expressions=[expression_fixture(t['material']['messages'][i],'情境'+str(i),'方式'+str(i)) for i in range(3)])
                     submitted=call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),result=result)
                     assert call('claim_chat_learning',session_id=sid)['reason']=='return_to_wait'
                     packet=follow(submitted['next_call']);assert packet['event']=='messages'
                     link=silence(packet);wake=follow(link);assert wake['event']=='learning_ready'
+                    tj=follow(wake['next_call'])['task'];assert tj['stage']=='extract_jargon'
+                    sj=call('submit_chat_learning',**tj['submit_call']['arguments'],invocation_id=key(),result=jargon_fixture(tj))
+                    wake=follow(sj['next_call']);assert wake['event']=='learning_ready'
                     t2=follow(wake['next_call'])['task'];assert t2['stage']=='review'
                     checked=review_fixture(t2)
                     final=call('submit_chat_learning',**t2['submit_call']['arguments'],invocation_id=key(),result=checked)
@@ -174,6 +179,10 @@ def main():
                     assert ui.post('/api/mcp/chat-library',json=budget_change,headers=headers).json()['hourly_call_budget']==8
                     wake=follow(link);t=follow(wake['next_call'])['task']
                     failed=call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),failure='timeout')
+                    # A cooling expression task must not block jargon work.
+                    jwake=follow(failed['next_call']);assert jwake['event']=='learning_ready'
+                    jt=follow(jwake['next_call'])['task'];assert jt['stage']=='extract_jargon'
+                    jf=call('submit_chat_learning',**jt['submit_call']['arguments'],invocation_id=key(),result=dict(jargon=[]))
                     began=time.perf_counter();cool=follow(failed['next_call']);cooldown_ms=(time.perf_counter()-began)*1000
                     assert cool['event']=='idle' and cooldown_ms>=900
                     timer[0]+=15;wake=follow(failed['next_call']);t=follow(wake['next_call'])['task']
@@ -199,8 +208,8 @@ def main():
                     sid=call('start_chat_session',conversation_id='111:group:222',persona_preset='little_whale_v2',idempotency_key=key())['session']['id']
                     assert not call('get_chat_learning',session_id=sid)['enabled']
                     assert not ReactionBot.sent and not ReactionBot.writes
-                    cost=dict(wake_ms=round(wake_ms,2),empty_wait_ms=round(idle_ms,2),budget_wait_ms=round(budget_ms,2),lease_wait_ms=round(lease_ms,2),cooldown_wait_ms=round(cooldown_ms,2),completed_model_stages=2,
-                              expression_count=3,jargon_candidates=1,extra_model_calls=0,qq_writes=0,
+                    cost=dict(wake_ms=round(wake_ms,2),empty_wait_ms=round(idle_ms,2),budget_wait_ms=round(budget_ms,2),lease_wait_ms=round(lease_ms,2),cooldown_wait_ms=round(cooldown_ms,2),completed_model_stages=3,
+                              expression_count=3,jargon_candidates=1,new_model_services=0,qq_writes=0,
                               host_boundary='one in-flight stage; lease 120s, host generation cannot be interrupted')
                     print('PASS start→silence→timer→wait→one stage→new chat first→review→persist→stop/revoke/new grant')
                     print(json.dumps(cost,ensure_ascii=False))

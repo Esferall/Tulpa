@@ -23,7 +23,8 @@ def main():
                 else:raise AssertionError('escaped installation root')
         (root/'nested').mkdir()
         with patch.object(installer,'ROOT',root/'nested/..'):
-            assert installer.install_target('wechat-reader','wechatauto/db.py')==root/'tools/wechat-reader/wechatauto/db.py'
+            expected=(root/'tools/wechat-reader/wechatauto/db.py').resolve()
+            assert installer.install_target('wechat-reader','wechatauto/db.py')==expected
     print('PASS isolated checkout install, canonical root and path containment; no network')
 
 

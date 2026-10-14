@@ -8,7 +8,6 @@ from urllib.request import urlopen
 
 ROOT=Path(__file__).resolve().parent.parent
 sys.path.insert(0,str(ROOT))
-from chatlocal.config import local_path
 from reader_patches import patch_qq_proxy,patch_wechat_db,patch_qq_helper,patch_qq_configured_root,patch_qq_passive_scan
 
 QQ_COMMIT='b55675779e50edec913fab9d891e4185c8f7c9ac'
@@ -20,8 +19,20 @@ QQ_FILES=['LICENSE','chatlog_keeper/__init__.py','chatlog_keeper/qq_db.py',
           'chatlog_keeper/_qq_sqlite_helper.py']+['chatlog_keeper/core/'+p for p in CORE]
 
 
+def install_target(directory,relative):
+    # The installer owns this checkout's tools/, not the app's import root.
+    # Resolve both sides identically (Windows runners may expose a junction).
+    root=ROOT.resolve()
+    base=(root/'tools'/directory).resolve()
+    target=(base/relative).resolve()
+    if directory not in ('qq-reader','wechat-reader') or not base.is_relative_to(root/'tools') or not target.is_relative_to(base):
+        raise ValueError('Reader installation path escaped tools directory')
+    return target
+
+
 def download(job):
     repo,commit,relative,directory=job
+    target=install_target(directory,relative)
     url=f'https://raw.githubusercontent.com/{repo}/{commit}/{relative}'
     with urlopen(url,timeout=45) as response:
         data=response.read()
@@ -36,10 +47,9 @@ def download(job):
         data=data.replace(original,b'return " ".join(out)')
         data=patch_qq_configured_root(data)
         data=patch_qq_passive_scan(data)
-    target=local_path(ROOT/'tools'/directory/relative)
     target.parent.mkdir(parents=True,exist_ok=True)
     target.write_bytes(data)
-    return dict(file=str(target.relative_to(ROOT)),url=url,source_sha256=source_hash,
+    return dict(file=str(target.relative_to(ROOT.resolve())),url=url,source_sha256=source_hash,
                 installed_sha256=hashlib.sha256(data).hexdigest())
 
 

@@ -146,9 +146,8 @@ class MCPChat:
 
     def live_target(self, grant, cid, kind='send'):
         self.permission(grant)
-        # Learning enforces its own host-context pin in ensure/attach. Keep
-        # existing authorized multi-session chatting valid; it must not gain
-        # access to another library through that separate chat permission.
+        # A grant may cover multiple groups. Each session and learning task
+        # still resolves one account/group through this authorization boundary.
         from .message_sender import qq_address
         target = dict(platform='qq', conversation_id=cid, conversation=cid)
         account, category, peer = qq_address(target)

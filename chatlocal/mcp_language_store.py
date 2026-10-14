@@ -169,9 +169,10 @@ class LanguageStore:
     def attach(self,b):
         """Called only after current account, group and grant verification."""
         with self.db() as db:
-            pin=db.execute('SELECT scope FROM pins WHERE gid=?',(b['gid'],)).fetchone()
-            if pin and pin[0]!=b['scope']:raise LearningError('new_host_context_required')
-            db.execute('INSERT OR IGNORE INTO pins VALUES(?,?)',(b['gid'],b['scope']))
+            # Knowledge belongs to account + group. A credential may access
+            # several libraries; only an individual run is bound to its target.
+            run=db.execute('SELECT scope,gid FROM language_runs WHERE sid=?',(b['sid'],)).fetchone()
+            if run and (run['scope']!=b['scope'] or run['gid']!=b['gid']):raise LearningError('scope_unavailable')
             now=self.clock()
             db.execute('INSERT OR IGNORE INTO language_libraries VALUES(?,1,0,0,?,?)',(b['scope'],now,now))
             db.execute('INSERT OR IGNORE INTO settings(scope,gid,enabled,allow_degraded,since,last_batch) VALUES(?,?,1,1,?,?)',(b['scope'],b['gid'],now,now))
@@ -179,11 +180,6 @@ class LanguageStore:
                        epoch=excluded.epoch,since=excluded.since WHERE language_runs.epoch!=excluded.epoch''',
                        (b['sid'],b['scope'],b['gid'],b['epoch'],now))
         return self.status(b)
-
-    def pin(self,gid):
-        with self.db() as db:
-            r=db.execute('SELECT scope FROM pins WHERE gid=?',(gid,)).fetchone()
-            return r[0] if r else None
 
     def configure(self,b,*,enabled,allow_degraded=True):
         if type(enabled) is not bool or type(allow_degraded) is not bool: raise LearningError('invalid_setting')
@@ -211,7 +207,8 @@ class LanguageStore:
     def _enabled(self,db,b):
         cfg=self.setting(db,b)
         if not cfg['enabled']:raise LearningError('learning_disabled')
-        if db.execute('SELECT scope FROM pins WHERE gid=?',(b['gid'],)).fetchone()[0]!=b['scope']:
+        if not db.execute('SELECT 1 FROM language_runs WHERE scope=? AND gid=? AND sid=? AND epoch=?',
+                          tuple(b[k] for k in ('scope','gid','sid','epoch'))).fetchone():
             raise LearningError('scope_unavailable')
         return cfg
 
@@ -359,10 +356,9 @@ class LanguageStore:
     def claim(self,b,context_id,*,reply_pending=False,wake_id=None):
         with self.db() as db:
             self._enabled(db,b)
-            context=digest(text(context_id,100))
-            old=db.execute('SELECT * FROM contexts WHERE id=?',(context,)).fetchone()
-            if old and (old['scope']!=b['scope'] or old['gid']!=b['gid']):raise LearningError('new_host_context_required')
-            db.execute('INSERT OR IGNORE INTO contexts VALUES(?,?,?)',(context,b['scope'],b['gid']))
+            # Legacy optional host label is accepted, never used as a library
+            # identity or permission. Old pins/contexts stay inert for rollback.
+            text(context_id,100)
             ready=self._readiness(db,b,reply_pending)
             if not ready['ready'] or (wake_id and wake_id!=ready['wake_id']):return None
             job=db.execute('SELECT * FROM jobs WHERE id=?',(ready['job_id'],)).fetchone()
@@ -371,6 +367,7 @@ class LanguageStore:
             db.execute("UPDATE jobs SET state='leased',lease=?,lease_until=?,attempts=attempts+1 WHERE id=?",(lease,self.clock()+self.cfg['lease_seconds'],job['id']))
             db.execute('INSERT INTO calls VALUES(?,?,?,?)',(b['scope'],b['gid'],self.clock(),size))
             return dict(job_id=job['id'],batch_id=job['batch_id'],stage=job['stage'],lease=lease,
+                        library_key=b['scope'],conversation_id=b['scope'][3:],
                         expires_at=self.clock()+self.cfg['lease_seconds'],material=material,material_chars=size,
                         wake_id=ready['wake_id'],independence='degraded',expression_contract=evidence.VERSION,prompt=STAGES[job['stage']],result_schema=RESULTS[job['stage']],
                         jargon_contract=jargon_learning.VERSION,context_verification=jargon_learning.CONTEXT,
@@ -529,7 +526,8 @@ class LanguageStore:
             pending=db.execute("SELECT stage,state,failure FROM jobs WHERE scope=? AND gid=? AND sid=? AND epoch=? ORDER BY created DESC,rowid DESC LIMIT 3",
                                tuple(b[k] for k in ('scope','gid','sid','epoch'))).fetchall()
             calls=db.execute('SELECT count(*),coalesce(sum(chars),0) FROM calls WHERE scope=? AND at>?',(b['scope'],self.clock()-3600)).fetchone()
-            result=dict(enabled=bool(cfg['enabled']),independence='degraded',allow_degraded=True,
+            result=dict(library_key=b['scope'],conversation_id=b['scope'][3:],
+                        enabled=bool(cfg['enabled']),independence='degraded',allow_degraded=True,
                         expression_count=counts[0],usable_expressions=(counts[1] or 0) if cfg['enabled'] else 0,
                         jargon_count=words[0],confirmed_jargon=words[1] or 0,last_learned=cfg['last_learned'],
                         pending=[dict(r) for r in pending],last_failure=cfg['failure'],dropped_messages=cfg['dropped'],

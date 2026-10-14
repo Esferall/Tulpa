@@ -184,7 +184,7 @@ def main():
         assert store.context(binding,'plan-no-word',['无关'],'intent')['jargon']==[]
         print('PASS expression review/count/weighted/vector caps/selection; jargon extraction/context/three stages')
 
-        # Scope isolation, including a reused host context and foreign sources.
+        # Libraries stay separate even when one credential/host visits both.
         other=dict(binding,scope='qq:111:group:223',gid='grant-beta',sid='session-beta')
         second=dict(binding,scope='qq:999:group:222',gid='grant-other-account',sid='session-other')
         for b in (other,second):
@@ -195,8 +195,11 @@ def main():
                 with store.db() as db:db.execute("DELETE FROM expressions WHERE id='foreign-vector'")
             assert store.status(b,records=True)['expressions']==[] and store.status(b,records=True)['jargon']==[]
             assert store.context(b,'blank-'+b['gid'],['云朵开机'],'intent')['jargon']==[]
-        rejected('new_host_context_required',lambda:store.claim(other,'fresh-grant-a'))
-        rejected('new_host_context_required',lambda:store.configure(dict(binding,scope=other['scope']),enabled=True))
+        assert store.claim(other,'fresh-grant-a') is None
+        shared=dict(other,gid=binding['gid'],sid='shared-connection-other-group')
+        store.configure(shared,enabled=True)
+        assert store.status(shared)['expression_count']==0
+        rejected('scope_unavailable',lambda:store.configure(dict(binding,scope=other['scope']),enabled=True))
         rejected('task_unavailable',lambda:submit(task,r,second))
         add(10,'b',second);clock.advance(30);bt=claim(second);bad=extraction(bt);bad['expressions'][0]['source_id']=task['material']['messages'][0]['source_id']
         rejected('invalid_source',lambda:submit(bt,bad,second))
@@ -204,6 +207,7 @@ def main():
         rejected('task_unavailable',lambda:submit(bt,extraction(bt),second))
         saved=store.status(binding,records=True)
         store.cancel();binding['epoch']='connection-restored'
+        store.attach(binding)
         assert store.status(binding,records=True)['expressions']==saved['expressions']
         assert store.context(binding,'restore',['云朵开机'],'intent')['jargon']
         print('PASS A/alpha → A/beta empty → B/alpha empty → foreign and late denied → A/alpha preserved')

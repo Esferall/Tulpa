@@ -57,7 +57,7 @@
   chatDialog.innerHTML=`<div class="dialog-head"><h2 id="mcp-chat-title">群聊与学习</h2><button id="mcp-chat-close" type="button" class="icon-button" aria-label="关闭群聊与学习">×</button></div>
     <div class="mcp-body" id="mcp-chat-panel">
       <p>请在已连接的 Agent 对话中发起持续聊天，例如“用小鲸鱼2号在某群持续聊天”。这里可以查看状态、停止会话和管理学习记录。</p>
-      <details><summary>运行与人物说明</summary><p class="mcp-muted">在当前机器人 QQ 和群聊中边聊边学，潜水也会积累。停止后重新开始，原群的学习记录仍在。</p>
+      <details><summary>运行与人物说明</summary><p class="mcp-muted">在当前机器人 QQ 和群聊中边聊边学，潜水也会积累。知识按机器人账号和群号保存；同一连接可用于多个已授权群。停止、换连接后，同账号同群仍接续原有积累。</p>
       <p class="mcp-muted">新人格可保存为 UTF-8 .md 文件，放入当前安装目录的 chatlocal/prompts/mcp_chat/。让 Agent 查看人格列表即可发现，无需重启；已经开启的群聊继续使用原人格。</p>
       <p class="mcp-muted">保持 QQ、OneBot WebSocket 事件服务和外部 Agent 运行。外部客户端结束任务后需在 Agent 对话中接续，Tulpa 不会自动启动模型。未接续时显示等待 Agent。</p></details>
       <p id="mcp-event-status" role="status" class="mcp-muted"></p><details id="mcp-chat-advanced"><summary>高级操作</summary><button id="mcp-chat-refresh" type="button">刷新聊天状态</button> <button id="mcp-chat-stop-all" type="button" disabled>停止全部群聊</button></details>

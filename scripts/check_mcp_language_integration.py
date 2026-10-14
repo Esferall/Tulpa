@@ -112,11 +112,12 @@ def main():
                         assert submit(t,review_fixture(t),'actual-call-2')['state']=='completed'
                         assert call('get_chat_learning',session_id=sid)['usable_expressions']==3
                     assert asyncio.run(wire(service,created['token'],sid))
-                    # Server-authoritative binding: knowing another SID or
-                    # choosing a new cid cannot inspect the old partition.
+                    # One connection can learn in two groups. Each session
+                    # still resolves its own library and evidence partition.
                     denied=call('start_chat_session',conversation_id='111:group:223',persona_preset='little_whale_v2',idempotency_key='fixture-other')
                     other_sid=denied['session']['id']
-                    assert call('get_chat_learning',session_id=other_sid)['error_code']=='new_host_context_required'
+                    other=call('get_chat_learning',session_id=other_sid)
+                    assert other['enabled'] and other['expression_count']==0 and other['library_key']=='qq:111:group:223'
                     call('stop_chat_session',session_id=other_sid)
                     bad=call('claim_chat_learning',session_id=sid,context_id='fresh-context',account_id='999')
                     assert bad['error_code']=='invalid_arguments'
@@ -137,7 +138,7 @@ def main():
                     assert call('get_chat_learning',session_id=sid).get('expression_count') is None
                     print(json.dumps(dict(status='passed',transport='MCP HTTP + loopback WS',observations=10,
                         model_calls='3 simulated separate invocations',historical_db_reads=0,external_writes=0,
-                        checks=['scope and grant pin','API opt-in and CSRF','SELF/history/synthetic/foreign filter','extract-review-persist',
+                        checks=['account/group libraries independent of grant','API opt-in and CSRF','SELF/history/synthetic/foreign filter','extract-review-persist',
                                 'default self-check usable with 10-expression threshold','tool discovery','disable record','disconnect/stop late result rejected']),ensure_ascii=False))
     finally:
         server.shutdown();events.close()

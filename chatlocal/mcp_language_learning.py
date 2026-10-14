@@ -14,13 +14,15 @@ def schemas(tool):
     sid=dict(type='string',minLength=32,maxLength=32)
     common=dict(session_id=sid)
     return [
-        tool('get_chat_learning','查看本会话当前账号与群的学习状态和少量抽象条目。不能查询其他分区，不能启用学习。',
-             dict(**common,records=dict(type='boolean')),['session_id']),
+        tool('get_chat_learning','读取指定账号与群的本地表达、黑话库。session_id 或 conversation_id 二选一；'
+             'conversation_id 使用 list_chat_groups 返回的账号:group:群号，无需先开启聊天。'
+             '同一连接可访问多个已授权群，不同连接访问同账号同群共用知识。此工具不会开始收集或启用学习。',
+             dict(**common,conversation_id=dict(type='string',minLength=9,maxLength=120),records=dict(type='boolean')),[]),
         tool('claim_chat_learning','wait_chat_messages 返回 learning_ready 时按 next_call 自动领取一个阶段。一次只做一个阶段，提交后必须回到 wait，潜水也继续循环。程序不调用模型。'
              '当前 Agent 另一次模型调用完成该阶段，再 submit。每阶段不同 invocation_id。只学习群友实际用语，绝不能总结自己的回复或人格规则；严格逐字证据与语言形式校验。'
              '表达 extract/review 与黑话 extract_jargon 是独立任务，按领取的 result_schema 提交；黑话解释证据不足会提前结束。'
-             '顺序上下文一律 degraded，不得假装独立；换账号/群必须新建 MCP 连接及宿主会话。',
-             dict(**common,context_id=dict(type='string',minLength=8,maxLength=100,description='可省略，服务端使用本会话绑定的上下文标识。'),wake_id=dict(type='string',minLength=64,maxLength=64)),['session_id']),
+             '顺序上下文一律 degraded，不得假装独立。每个任务由 session_id 定位账号与群；不同群的任务和来源不能混用。',
+             dict(**common,context_id=dict(type='string',minLength=8,maxLength=100,description='兼容旧客户端的可选标识，不绑定群或知识库。'),wake_id=dict(type='string',minLength=64,maxLength=64)),['session_id']),
         tool('submit_chat_learning','提交已领取阶段的结构化模型结果或一次失败。重试原 lease 和结果幂等；'
              '下一阶段须另一次实际模型调用。不接受账号/群号/其他批次来源。失效任务不恢复。',
              dict(**common,job_id=sid,lease=sid,invocation_id=dict(type='string',minLength=8,maxLength=100),
@@ -37,7 +39,8 @@ def schemas(tool):
 ERRORS={
  'learning_disabled':'当前账号和群已暂停学习；正常聊天继续，可在高级设置恢复。',
  'source_unavailable':'当前实时连接或账号无法核实，学习暂停。',
- 'new_host_context_required':'此 MCP 连接已绑定另一个学习作用域。请新建 MCP 连接，并在新的宿主对话中开始；不能沿用旧上下文切群/切号。',
+ 'scope_unavailable':'当前授权、会话或账号群不匹配，不能访问这份学习资料。',
+ 'invalid_learning_target':'请只提供 session_id 或 conversation_id 其中一个，以明确要读取的账号和群。',
  'task_unavailable':'任务不存在、已取消或不属于当前会话与连接。不要沿用旧材料重新提交。',
  'lease_unavailable':'领取凭据已失效。先查询当前状态；不要提交旧结果。',
  'invalid_source':'来源不属于本批真实他人消息，或黑话未出现在该原文中。',
@@ -75,7 +78,6 @@ class ChatLearning:
             self.store=LanguageStore(chat.access.path.parent/'mcp-language.sqlite3')
         with self.store.db() as db:
             self.enabled={r['scope'] for r in db.execute('SELECT scope FROM language_libraries WHERE enabled=1')}
-            self.pins={r['gid']:r['scope'] for r in db.execute('SELECT * FROM pins')}
         self.attached=set();self.yield_required=set();self.shutdown=threading.Event();self.worker=None
 
     def resume(self):
@@ -104,14 +106,9 @@ class ChatLearning:
                 self.invalidate(row['id'])
 
     def ensure(self,b):
-        key=(b['sid'],b['epoch'])
+        key=tuple(b[k] for k in ('scope','gid','sid','epoch'))
         if key in self.attached:return
-        if self.pins.get(b['gid']) not in (None,b['scope']):raise LearningError('new_host_context_required')
-        # Existing multi-group use must not be silently stopped or repinned.
-        with self.chat.access.connect() as db:
-            other=db.execute('SELECT 1 FROM chat_sessions WHERE grant_id=? AND active=1 AND conversation_id!=?',(b['gid'],b['scope'][3:])).fetchone()
-        if other:raise LearningError('new_host_context_required')
-        state=self.store.attach(b);self.attached.add(key);self.pins[b['gid']]=b['scope']
+        state=self.store.attach(b);self.attached.add(key)
         if state['enabled']:self.enabled.add(b['scope'])
 
     def readiness(self,b):
@@ -142,10 +139,6 @@ class ChatLearning:
         # also checks self_id. Config changes/disconnect rotate this epoch.
         return dict(scope='qq:'+row['conversation_id'],gid=gid,sid=sid,epoch=self.epoch)
 
-    def check_target(self,grant,cid):
-        pinned=self.pins.get(grant['id'])
-        if pinned and pinned!='qq:'+cid:raise LearningError('new_host_context_required')
-
     def invalidate(self,sid=None):
         if sid:
             self.yield_required.discard(sid);self.store.cancel(dict(sid=sid),'session_stopped')
@@ -161,14 +154,8 @@ class ChatLearning:
                 b=dict(scope='qq:'+row['conversation_id'],gid=row['grant_id'],sid=sid,epoch=self.epoch)
             else:b=self.binding(sid,row['grant_id'])
             if self.config_error:raise LearningError('invalid_learning_policy')
-            if body['enabled']:
-                with self.chat.access.connect() as db:
-                    others=db.execute('SELECT 1 FROM chat_sessions WHERE grant_id=? AND active=1 AND conversation_id!=?',
-                                      (row['grant_id'],row['conversation_id'])).fetchone()
-                if others:raise LearningError('new_host_context_required')
             result=self.store.configure(b,**body)
-            if body['enabled']:
-                self.enabled.add(b['scope']);self.pins[b['gid']]=b['scope']
+            if body['enabled']:self.enabled.add(b['scope'])
             else:self.enabled.discard(b['scope'])
             for event in self.chat.events.values():event.set()
             return result
@@ -201,7 +188,8 @@ class ChatLearning:
             result=self.status(row['id'],grant['id'])
             return dict(enabled=result['enabled'],library=result['library'],automatic=True,
                         when='开始后自动边聊边学。silence 只是不发话；处理并确认消息后继续 wait。wait 返回 learning_ready 时按 next_call 领取并独立完成一个模型阶段，submit 后立即回 wait，先处理新消息。无任务继续等待，不退出、不忙轮询。',
-                        isolation='本连接固定账号与群；换群/账号须新连接和新宿主上下文。MCP 无法清除宿主已有记忆。')
+                        library_key=result['library_key'],
+                        isolation='知识按机器人账号与群号保存；连接仅用于访问授权。同一连接可在多个已授权群学习，按各自 session_id 处理任务。')
         except (ValueError,OSError,sqlite3.Error):return None
 
     def plan_context(self,p):
@@ -260,13 +248,24 @@ class ChatLearning:
             if candidate['revoked']:continue
             try:
                 grant=self.chat.access.by_id(candidate['id'],source=False)
-                self.chat.live_target(grant,cid)
-                plan=self.chat.access.plan(grant);now=time.time()*1000
-                if (plan.start is not None and now<plan.start) or (plan.end is not None and now>=plan.end):continue
-                with self.chat.access.connect() as db:active=db.execute('SELECT id FROM chat_sessions WHERE conversation_id=? AND grant_id=? AND active=1',(cid,grant['id'])).fetchone()
-                return dict(scope='qq:'+cid,gid=grant['id'],sid=active[0] if active else 'local-library-'+grant['id'],epoch=self.epoch)
+                return self.authorized_library(grant,cid)
             except ValueError:continue
         raise LearningError('scope_unavailable')
+
+    def authorized_library(self,grant,cid):
+        """Authenticate each read; a library is not owned by any grant/run.
+
+        Reading saved knowledge needs no live receiver or active chat. The
+        credential's account/group/date boundary still applies, including revoke.
+        """
+        grant=self.chat.access.by_id(grant['id'],source=False)
+        self.chat.live_target(grant,cid)
+        plan=self.chat.access.plan(grant);now=time.time()*1000
+        if (plan.start is not None and now<plan.start) or (plan.end is not None and now>=plan.end):
+            raise LearningError('scope_unavailable')
+        with self.chat.access.connect() as db:
+            active=db.execute('SELECT id FROM chat_sessions WHERE conversation_id=? AND grant_id=? AND active=1',(cid,grant['id'])).fetchone()
+        return dict(scope='qq:'+cid,gid=grant['id'],sid=active[0] if active else 'library-'+cid,epoch=self.epoch)
 
     def library(self,cid,records=False):
         with self.chat.lock:return self.store.status(self.library_binding(cid),records=records)
@@ -319,13 +318,18 @@ class ChatLearning:
                 item.update(learning=state,learning_state=label,can_start=not active,connection_id=b['gid'])
             except (ValueError,OSError,sqlite3.Error):
                 item.update(learning=None,learning_state='等待有效连接',can_start=False,
-                            error='请检查 OneBot 账号与该群授权；同一连接的学习只用于一个群，其他群需独立连接与 Agent 对话。')
+                            error='请检查 OneBot 登录账号及当前连接的群聊授权。学习库按账号和群号保留，不需要为其他已授权群另建连接。')
         return dict(groups=list(grouped.values()),receiver=self.chat.receiver.status())
 
     def call(self,grant,name,args):
-        sid=args['session_id']
         try:
             with self.chat.lock:
+                if name=='get_chat_learning':
+                    if ('session_id' in args)==('conversation_id' in args):raise LearningError('invalid_learning_target')
+                    if 'conversation_id' in args:
+                        b=self.authorized_library(grant,args['conversation_id'])
+                        return self.store.status(b,records=args.get('records',False))
+                sid=args['session_id']
                 b=self.binding(sid,grant['id'])
                 self.ensure(b)
                 self.chat.touch(sid)

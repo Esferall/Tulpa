@@ -20,6 +20,8 @@ from .mcp_access import RateLimited
 from .mcp_chat import MCPChat, CHAT_TOOLS
 from .mcp_chat_media import MEDIA_TOOLS, MEDIA_WRITES, schemas as media_schemas
 from .mcp_reactions import TOOL as REACTION_TOOL, schema as reaction_schema, ChatReactions
+from .mcp_qq import TOOLS as QQ_TOOLS, WRITES as QQ_WRITES, schemas as qq_schemas
+from .mcp_qq_permissions import QQ_FLAGS
 from .retrieval import scope_sql
 
 
@@ -135,7 +137,7 @@ class MCPTools:
                 proposal['parameters']['properties'].update(common)
                 proposal['parameters']['required'].append('idempotency_key')
                 rows.append(proposal)
-        if grant['scope'].get('send') or grant['scope'].get('manage'):
+        if grant['scope'].get('send') or grant['scope'].get('manage') or any(grant['scope'].get(k) for k in QQ_FLAGS):
             rows.append(tool('get_qq_operation','查询本连接的操作回执。UNKNOWN 不得自动重试，应先核对真实 QQ 状态。',dict(operation_id=dict(type='string',maxLength=64)),['operation_id']))
         if grant['scope'].get('chat') and grant['scope'].get('send'):
             from .mcp_chat import schemas as chat_schemas
@@ -143,6 +145,7 @@ class MCPTools:
             rows += media_schemas(tool, grant['scope'])
             if grant['scope'].get('chat_reactions') and self.chat.reactions.policy()['enabled']:
                 rows.append(reaction_schema(tool,self.chat.reactions.policy()['candidates']))
+        rows += qq_schemas(tool,grant['scope'])
         rows.append(tool('read_message', '按字符分页读一条允许范围内的原始消息，适合被搜索结果截断的长消息。',
                          dict(message_id=dict(type='integer', minimum=1),
                               offset=dict(type='integer', minimum=0),
@@ -153,7 +156,7 @@ class MCPTools:
         for schema in rows:
             schema['description'] = schema['description'].replace('每轮最多3条。', '').replace('每轮最多3个，每个32MiB。', '每个32MiB。')
             props = schema['parameters']['properties']
-            if 'offset' in props:
+            if 'offset' in props and schema['name'] not in QQ_TOOLS:
                 props['offset'].pop('maximum', None)
             if schema['name'] in READ_TOOLS:
                 props['snapshot_max_id'] = dict(type='integer', minimum=0, description='分页沿用返回值，新的调查可不填；只冻结新增入库上界，不是历史内容快照。')
@@ -167,8 +170,10 @@ class MCPTools:
         return rows
 
     def call(self, token, name, arguments, cancel, source_base=''):
-        grant = self.access.authorize(token, source=name not in CHAT_TOOLS and name not in MEDIA_TOOLS)
-        if name in MEDIA_TOOLS:
+        grant = self.access.authorize(token, source=name not in CHAT_TOOLS and name not in MEDIA_TOOLS and name not in QQ_TOOLS and name!='get_qq_operation')
+        if name in QQ_TOOLS:
+            rows = qq_schemas(tool,grant['scope'])
+        elif name in MEDIA_TOOLS:
             rows = media_schemas(tool, grant['scope'])
         elif name in CHAT_TOOLS:
             # A stalled OneBot health probe must never delay stop/status/wait.
@@ -193,6 +198,9 @@ class MCPTools:
             return self.result(dict(error='参数不符合工具格式；按字段提示修正，不要原样反复调用。',
                 error_code='invalid_arguments',argument_errors=problems,
                 recovery=dict(action='correct_arguments',executed=False,repeat_unchanged=False)))
+        self.access.ensure_revision(grant)
+        if name in QQ_TOOLS:
+            return self.qq_call(grant,token,name,arguments,cancel)
         if name in CHAT_TOOLS:
             return self.chat_call(grant, token, name, arguments, cancel)
         if name in MEDIA_TOOLS:
@@ -217,8 +225,16 @@ class MCPTools:
                                 with self.access.connect() as db:
                                     active=db.execute('SELECT 1 FROM chat_sessions WHERE active=1 AND conversation_id=?',(arguments['conversation_id'],)).fetchone()
                                 if active:raise ValueError('该群处于持续聊天中，请走 plan_chat_reply → send_chat_reply，不能绕过等待和发送队列。')
-                        data=self.actions.execute(grant,'send' if name=='send_qq_message' else 'manage',arguments,cancel,guard=chat_boundary)
-                    self.access.authorize(token)
+                        resolver = None
+                        if name == 'manage_qq_group' and grant['scope'].get('chat_account'):
+                            def resolver(current, cid, kind):
+                                self.chat.qq.identity(current, 'manage')
+                                target = self.chat.qq.target(current, cid)
+                                if target['kind'] != 'group':
+                                    raise ValueError('需要完整的 QQ 群会话编号。')
+                                return dict(platform='qq', conversation_id=cid, conversation=cid)
+                        data=self.actions.execute(grant,'send' if name=='send_qq_message' else 'manage',arguments,cancel,guard=chat_boundary,target_resolver=resolver)
+                    self.access.authorize(token,source=name!='get_qq_operation')
                     # A completed write receipt must not be disguised as an unexecuted cancellation.
                     status='ok'
                     return self.result(data)
@@ -242,6 +258,14 @@ class MCPTools:
                 tools.qq_refreshed = set()
                 tools.qq_requests = {}
                 tools.management_context = None
+                if name == 'read_qq_group' and arguments.get('view') in ('info', 'members', 'requests') and grant['scope'].get('chat_account'):
+                    def live_group_scope(cid):
+                        self.chat.qq.identity(grant, 'onebot')
+                        target = self.chat.qq.target(grant, cid)
+                        if target['kind'] != 'group':
+                            raise ValueError('需要完整的 QQ 群会话编号。')
+                        return cid
+                    tools._qq_scope = live_group_scope
                 args = {k: v for k, v in arguments.items() if k != 'snapshot_max_id'}
                 images = []
                 if name in ('download_file','prepare_file'):
@@ -316,6 +340,7 @@ class MCPTools:
                             scope_note='当前授权范围；分页上界不冻结后续编辑/删除，事实需要时应重新核对。')
             # Revocation/account replacement during a slow parse must stop disclosure.
             self.access.authorize(token)
+            self.access.ensure_revision(grant)
             if cancel.is_set():
                 raise ValueError('调用已取消，未返回资料。')
             status = 'error' if data.get('error') else 'ok'
@@ -342,7 +367,7 @@ class MCPTools:
             data=self.chat.call(grant,name,arguments,cancel)
             # A revocation after dispatch stops future actions; it cannot turn
             # this operation's durable receipt into a false "not executed".
-            if name not in (REACTION_TOOL,'send_chat_reply','send_chat_message'):self.access.authorize(token, source=False)
+            if name not in (REACTION_TOOL,'send_chat_reply','send_chat_message'):self.access.ensure_revision(grant)
             if cancel.is_set() and name not in ('send_chat_reply','send_chat_message','stop_chat_session',REACTION_TOOL):
                 data=dict(event='cancelled',messages=[],note='本次调用已取消；需要结束聊天请停止会话。')
             status=data.get('state','ok').lower();count=len(data.get('messages',[]))
@@ -392,6 +417,24 @@ class MCPTools:
     def result(data, images=()):
         return types.CallToolResult(content=[types.TextContent(type='text', text=json.dumps(data, ensure_ascii=False)), *images],
                                     structuredContent=data, isError=bool(data.get('error')))
+
+    def qq_call(self, grant, token, name, arguments, cancel):
+        extension=self.chat.qq
+        if not extension.slots.acquire(False):return self.result(dict(error='SL 扩展通道繁忙；聊天等待和停止仍可使用。',error_code='qq_busy'))
+        began=time.monotonic();call_id=None;status='error'
+        try:
+            call_id=self.access.begin_call(grant['id'],name)
+            data,blocks=extension.call(grant,name,arguments,cancel)
+            if 'state' not in data:
+                self.access.ensure_revision(grant);extension.check_cancel(cancel)
+            status=data.get('state','ok').lower()
+            return self.result(data,blocks)
+        except RateLimited as exc:return self.result(dict(error=str(exc),error_code='rate_limited'))
+        except ValueError as exc:return self.result(dict(error=str(exc),error_code='qq_rejected'))
+        except (OSError,RuntimeError,sqlite3.Error):return self.result(dict(error='SL 扩展处理失败；已派发的操作请以原编号查询，不要换编号重试。',error_code='qq_failed'))
+        finally:
+            if call_id is not None:self.access.finish_call(call_id,status,time.monotonic()-began)
+            extension.slots.release()
 
 
 class MCPChatTools(ChatTools):

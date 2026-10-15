@@ -18,7 +18,9 @@ from starlette.routing import Route
 from .mcp_access import AccessDenied
 from .mcp_tools import MCPTools, INSTRUCTIONS
 from .mcp_chat import CHAT_TOOLS
-from .mcp_chat_media import MEDIA_TOOLS, MEDIA_WRITES
+from .mcp_chat_media import MEDIA_TOOLS, MEDIA_WRITES, MAX_BASE64_LENGTH
+from .mcp_qq import TOOLS as QQ_TOOLS, WRITES as QQ_WRITES
+from .mcp_qq_media import MAX_BASE64_LENGTH as QQ_MAX_BASE64_LENGTH, allowed_kinds
 from .version import VERSION
 
 
@@ -55,10 +57,10 @@ class MCPService:
             # call, not the transport; live chat must work without that database.
             grant = self.access.authorize(token, source=False)
             rows = await anyio.to_thread.run_sync(self.tools.schemas, grant)
-            self.access.authorize(token, source=False)
+            self.access.ensure_revision(grant)
             return [types.Tool(name=s['name'], description=s['description'], inputSchema=s['parameters'],
-                    annotations=types.ToolAnnotations(readOnlyHint=s['name'] not in CHAT_TOOLS and s['name'] not in MEDIA_WRITES and s['name'] not in ('prepare_file', 'download_file', 'transcribe_voice', 'read_qq_group', 'get_group_knowledge','send_qq_message','manage_qq_group'),
-                        destructiveHint=s['name']=='manage_qq_group', openWorldHint=s['name'] in ('send_qq_message','manage_qq_group','send_chat_reply','send_chat_message','send_chat_sticker','collect_chat_sticker','react_to_chat_message'))) for s in rows]
+                    annotations=types.ToolAnnotations(readOnlyHint=s['name'] not in QQ_WRITES and s['name'] not in CHAT_TOOLS and s['name'] not in MEDIA_WRITES and s['name'] not in ('prepare_file', 'download_file', 'transcribe_voice', 'read_qq_group', 'get_group_knowledge','send_qq_message','manage_qq_group'),
+                        destructiveHint=s['name'] in ('manage_qq_group','qq_group_action','qq_message_action','qq_file_action','qq_friend_action','qq_qzone_action','qq_album_action'), openWorldHint=s['name'] in QQ_WRITES-{'import_qq_media'} or s['name'] in ('send_qq_message','manage_qq_group','send_chat_reply','send_chat_message','send_chat_sticker','collect_chat_sticker','react_to_chat_message'))) for s in rows]
 
         @protocol.call_tool(validate_input=False)
         async def call_tool(name, arguments):
@@ -106,6 +108,15 @@ class MCPService:
                     grant = service.access.authorize(auth[7:], source=False)
                 except AccessDenied:
                     return await rejected(401)(scope, receive, send)
+                # Only authorized image imports may exceed the ordinary 32 KiB
+                # request cap. Check the actual method after parsing, too; a
+                # larger transport budget must not enlarge other tool inputs.
+                ordinary_limit = 32768
+                can_import = all(grant['scope'].get(flag) for flag in ('chat', 'send', 'chat_images', 'chat_sticker_send'))
+                import_kinds=allowed_kinds(grant['scope'])
+                media_limit=(MAX_BASE64_LENGTH if import_kinds==['image'] else QQ_MAX_BASE64_LENGTH) if import_kinds else 0
+                can_import_media=bool(media_limit)
+                body_limit = max(media_limit,MAX_BASE64_LENGTH if can_import else 0) + ordinary_limit
                 # Bound bodies without relying on Content-Length (chunked supported).
                 body = bytearray()
                 if request.method == 'POST':
@@ -113,13 +124,19 @@ class MCPService:
                         with anyio.fail_after(10):
                             async for chunk in request.stream():
                                 body.extend(chunk)
-                                if len(body) > 32768:
+                                if len(body) > body_limit:
                                     return await rejected(413)(scope, receive, send)
                         payload = json.loads(body)
                     except (ValueError, TimeoutError):
                         return await rejected(400)(scope, receive, send)
                     if not isinstance(payload, dict):
                         return await rejected(400)(scope, receive, send)
+                    params = payload.get('params')
+                    if len(body) > ordinary_limit:
+                        limit=(MAX_BASE64_LENGTH if can_import and isinstance(params,dict) and params.get('name')=='import_chat_image' else
+                               media_limit if can_import_media and isinstance(params,dict) and params.get('name')=='import_qq_media' else 0)
+                        if payload.get('method')!='tools/call' or not limit or len(body)>limit+ordinary_limit:
+                            return await rejected(413)(scope, receive, send)
                 else:
                     payload = {}
                 key = (grant['id'], json.dumps(payload.get('id'), sort_keys=True))
@@ -211,6 +228,20 @@ class MCPService:
             for (owner, _), event in self.pending.items():
                 if gid is None or gid == owner:
                     event.set()
+
+    def update_permissions(self, gid, body):
+        # Serialize against session insertion so a start prepared with the old
+        # grant cannot slip in between the update and stopping existing sessions.
+        with self.tools.chat.lock:
+            result = self.access.update_permissions(gid, body)
+            stopped = 0
+            if result['changed']:
+                self.cancel(gid)
+                stopped = self.tools.chat.stop_all(gid, '连接权限已修改，请重新开始会话')['stopped']
+                if result['scope'].get('qq_friends') and self.access.settings()['enabled']:
+                    self.tools.chat.receiver.start()
+        return dict(result,ok=True,stopped_sessions=stopped,
+                    note='权限已保存，原凭证继续有效；请刷新工具列表，需要聊天时重新开始会话。' if result['changed'] else '权限未变化，原会话继续运行。')
 
     def stop(self):
         with self.lock:

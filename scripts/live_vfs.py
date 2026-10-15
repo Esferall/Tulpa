@@ -29,6 +29,10 @@ def configure_qq_worker():
     global _qq_worker
     if _qq_worker:
         return
+    if sys.platform.startswith('linux'):
+        # Linux NTQQ uses the normal SQLite pending byte. Do not load or apply
+        # the Windows-only wrapped lock-page exception on this platform.
+        return
     if sys.platform != 'win32' or apsw.sqlitelibversion() != '3.53.4' or apsw.connections():
         raise ValueError('qq_live_runtime_mismatch')
     dll = ROOT / '_internal/qq-live-lock.dll'
@@ -163,7 +167,7 @@ class PageView:
                         number = struct.unpack('>I', self.wal.read(4))[0]
                         self.pages[number] = position + 24
                     self.size = plan.commit_size * 4096
-            if platform == 'qq' and self.size >= 262144 * 4096:
+            if os.name=='nt' and platform == 'qq' and self.size >= 262144 * 4096:
                 if not _qq_worker:
                     raise ValueError('qq_live_runtime_missing')
                 # Only the exact wrapped Windows placeholder may bypass HMAC.

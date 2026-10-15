@@ -158,7 +158,9 @@ class QQSender:
         info=self.call('get_msg',dict(message_id=int(mid)))
         sender=info.get('sender') if isinstance(info,dict) and isinstance(info.get('sender'),dict) else {}
         if (not isinstance(info,dict) or str(info.get('message_id'))!=mid
-                or info.get('message_type')!='group' or str(info.get('group_id'))!=address['peer']
+                or info.get('message_type')!=('group' if address['kind']=='group' else 'private')
+                or (str(info.get('group_id'))!=address['peer'] if address['kind']=='group' else
+                    (str(info.get('target_id'))!=address['peer'] if str(sender.get('user_id'))==address['account'] else str(info.get('user_id'))!=address['peer']))
                 or ('self_id' in info and str(info['self_id'])!=address['account'])
                 or str(sender.get('user_id'))!=response_target['sender_id']
                 or type(info.get('time')) is not int or info['time']!=response_target['timestamp']//1000
@@ -172,8 +174,8 @@ class QQSender:
         The caller resolves the event in its own authorized session. OneBot
         lookups are repeated before dispatch to reject stale mappings/members.
         """
-        if address['kind']!='group':raise SendError('原生引用和 @ 仅用于当前持续群聊，未发送。')
-        if response_target and response_target.get('conversation_id')!=f'{address["account"]}:group:{address["peer"]}':
+        if address['kind']!='group' and mentions:raise SendError('私聊不能使用群成员 @，未发送。')
+        if response_target and response_target.get('conversation_id')!=f'{address["account"]}:{address["kind"]}:{address["peer"]}':
             raise SendError('回应目标不属于当前账号和群，未发送。')
         quote_id=None
         if quote:

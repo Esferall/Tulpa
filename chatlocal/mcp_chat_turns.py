@@ -38,7 +38,7 @@ def schema(tool):
              action=dict(type='string',enum=['wait','silence','reply']),
              target_event_id=event, topic_event_ids=dict(type='array',maxItems=5,uniqueItems=True,items=event),
              topic_terms=dict(type='array',maxItems=6,uniqueItems=True,items=dict(type='string',minLength=2,maxLength=24)),
-             expressions=dict(type='array',maxItems=3,uniqueItems=True,items=dict(type='string',enum=['text','sticker','reaction'])),
+             expressions=dict(type='array',maxItems=3,uniqueItems=True,items=dict(type='string',enum=['text','sticker','reaction','voice','video','file','ai_voice','qq_action'])),
              intent=dict(type='string',minLength=1,maxLength=200),
              wait_seconds=dict(type='number',minimum=0,maximum=30)),
         ['session_id','batch_id','action','intent']),
@@ -46,11 +46,15 @@ def schema(tool):
         'Replyer 阶段：按 READY 计划一次提交 1–3 个语义气泡，不按标点机械拆句。'
         '有学习候选的文字回复须先 select_chat_expressions，选 0–5 条；未选择会返回 expression_selection_required。'
         '程序串行发送、气泡间留间隔并重新检查相关新消息/停止/授权。STALE 需补读重规划，已发不撤回，旧尾部不续发；UNKNOWN 禁止重试。'
-        '纯 reaction、纯表情包均可结束本轮，不必配文。',
+        '纯 reaction、图片、语音、视频、文件均可结束本轮，不必配文。voice/video/file 气泡使用 import_qq_media 的 asset_id；ai_voice 使用 character_id 和 text；qq_action 使用 tool、action、params。',
         dict(session_id=sid,plan_id=sid,idempotency_key=key,
              bubbles=dict(type='array',minItems=1,maxItems=3,items=dict(type='object',additionalProperties=False,
-                properties=dict(kind=dict(type='string',enum=['text','sticker','reaction']),
+                properties=dict(kind=dict(type='string',enum=['text','sticker','reaction','voice','video','file','ai_voice','qq_action']),
                     text=dict(type='string',minLength=1,maxLength=4000),sticker_id=sid,
+                    asset_id=sid,folder_id=dict(type='string',minLength=1,maxLength=512),
+                    character_id=dict(type='string',minLength=1,maxLength=200),
+                    tool=dict(type='string',enum=['qq_interact','qq_message_action']),
+                    action=dict(type='string',minLength=1,maxLength=80),params=dict(type='object'),
                     event_id=event,reaction_id=dict(type='string',maxLength=64),
                     operation=dict(type='string',enum=['add','remove']),
                     quote=dict(type='boolean'),mention_user_ids=dict(type='array',maxItems=5,uniqueItems=True,
@@ -159,15 +163,35 @@ class ChatTurns:
         return [dict(json.loads(r['payload']),id=r['id'],delivered=bool(r['delivered'])) for r in rows]
 
     @staticmethod
-    def related(message,focus,account):
-        if message.get('is_self'):return False
-        if focus.get('all'):return True
-        if message['sender_id'] in focus['senders']:return True
-        for seg in message.get('segments',[]):
-            if seg.get('type')=='reply' and seg.get('onebot_message_id') in focus['message_ids']:return True
-            if seg.get('type')=='at' and seg.get('qq')==account:return True
-        text=message.get('content','').casefold()
-        return any(term.casefold() in text for term in focus['terms'])
+    def related_messages(messages,focus,account):
+        peers=[m for m in messages if not m.get('is_self')]
+        if focus.get('all'):return peers
+        message_ids=set(map(str,focus['message_ids']))
+        terms=[term.casefold() for term in focus['terms']]
+        following=set();related=[];started=False
+        # Follow the chosen conversation in event order. A participant who
+        # explicitly addresses another conversation takes their unmarked
+        # followups with them; their identity alone must not stall this reply.
+        # Quoting this thread, addressing us or a selected topic term brings
+        # them back. No timeout guesses away a late, unaddressed correction.
+        for message in messages:
+            sender=message['sender_id'];mid=str(message['onebot_message_id'])
+            if mid in message_ids:started=True
+            if not started or message.get('is_self'):continue
+            replies={str(s.get('onebot_message_id')) for s in message.get('segments',[]) if s.get('type')=='reply'}
+            mentions={str(s.get('qq')) for s in message.get('segments',[]) if s.get('type')=='at' and s.get('qq') not in ('all','',None)}
+            direct=(mid in message_ids or bool(replies & message_ids) or account in mentions
+                    or any(term in message.get('content','').casefold() for term in terms))
+            if direct:following.add(sender)
+            elif replies or mentions:
+                following.discard(sender)
+                continue
+            elif sender not in following:continue
+            related.append(message)
+            # Preserve reply chains, including another participant quoting a
+            # supplement and then adding an unmarked correction of their own.
+            message_ids.add(mid)
+        return related
 
     def collection(self,row,pending,quiet,started):
         policy=self.policy();items=self.chat.messages(pending)
@@ -176,8 +200,8 @@ class ChatTurns:
         # The oldest pending speaker anchors this bounded collection. Unrelated
         # hot-group traffic cannot slide its tail forever. @ is prioritized later.
         anchor=peers[0]
-        focus=dict(senders=[anchor['sender_id']],message_ids=[anchor['onebot_message_id']],terms=[])
-        relevant=[m for m in peers if self.related(m,focus,row['conversation_id'].split(':')[0])]
+        focus=dict(message_ids=[anchor['onebot_message_id']],terms=[])
+        relevant=self.related_messages(peers,focus,row['conversation_id'].split(':')[0])
         remaining=max(0,quiet-(time.time()-max(m['received_at'] for m in relevant)))
         capped=time.monotonic()-started>=policy['max_collect_seconds']
         return dict(ready=remaining==0 or capped,reason='collection_limit' if capped and remaining else 'quiet' if not remaining else 'collecting',
@@ -277,7 +301,7 @@ class ChatTurns:
             for item in json.loads(queued[0]):
                 mid=item.get('receipt',{}).get('result',{}).get('message_id')
                 if mid:focus['message_ids'].append(str(mid))
-        relevant=[m for m in rows if self.related(m,focus,account)]
+        relevant=self.related_messages(rows,focus,account)
         fresh=[m['id'] for m in relevant if m['id']>data['watermark']]
         if fresh:raise TurnRejected('stale','目标相关的新消息尚未纳入决策，请补读并重新规划。',refresh_event_ids=fresh[:12])
         last=max((m['received_at'] for m in relevant),default=data['read_at']-policy['quiet_seconds'])
@@ -324,10 +348,15 @@ class ChatTurns:
                 raise TurnRejected('reaction_permission','仅回应也需要真实目标和回应授权。')
             if 'sticker' in expressions and not grant['scope'].get('chat_sticker_send'):
                 raise TurnRejected('sticker_permission','连接未获发送表情包权限。')
-            focus=dict(senders=list({m['sender_id'] for m in focus_rows if not m['is_self']}),
-                       message_ids=[m['onebot_message_id'] for m in focus_rows],terms=args.get('topic_terms',[]),all=not bool(focus_ids))
+            for expression,flag in (('voice','chat_voice'),('ai_voice','chat_voice'),('video','chat_video'),('file','chat_files')):
+                if expression in expressions and not grant['scope'].get(flag):raise TurnRejected('attachment_permission','连接没有所选附件权限。')
+            if 'qq_action' in expressions and not any(grant['scope'].get(f) for f in ('qq_messages','qq_interactions')):
+                raise TurnRejected('qq_permission','连接没有消息操作或互动权限。')
+            if 'reaction' in expressions and ':direct:' in self.chat.row(sid)['conversation_id']:
+                raise TurnRejected('reaction_unavailable','私聊暂不支持消息表情回应。')
             # Untargeted proactive replies use all peer input as their subject.
-            if not focus_ids:focus['senders']=list({m['sender_id'] for m in rows if not m['is_self']})
+            focus=dict(message_ids=[m['onebot_message_id'] for m in focus_rows],
+                       terms=args.get('topic_terms',[]),all=not bool(focus_ids))
             row=self.chat.row(sid);pid=uuid.uuid4().hex
             data=dict(action=args['action'],target_event_id=target,focus_ids=focus_ids,focus=focus,
                 expressions=expressions,intent=args['intent'],batch_id=batch['id'],watermark=batch['watermark'],
@@ -368,12 +397,27 @@ class ChatTurns:
             if p['state']!='READY':raise TurnRejected('plan_not_ready','该计划不可发送，请读取结果或补读重规划。')
             if not isinstance(bubbles,list) or not 1<=len(bubbles)<=3:raise TurnRejected('invalid_bubbles','一次提交 1–3 个语义气泡。')
             for i,b in enumerate(bubbles):
-                kind=b['kind'];allowed={'text':{'kind','text','quote','mention_user_ids'},'sticker':{'kind','sticker_id'},'reaction':{'kind','event_id','reaction_id','operation'}}[kind]
+                kind=b['kind'];allowed={'text':{'kind','text','quote','mention_user_ids'},'sticker':{'kind','sticker_id'},'reaction':{'kind','event_id','reaction_id','operation'},
+                    'voice':{'kind','asset_id'},'video':{'kind','asset_id'},'file':{'kind','asset_id','folder_id'},
+                    'ai_voice':{'kind','text','character_id'},'qq_action':{'kind','tool','action','params'}}[kind]
                 if set(b)-allowed or kind not in data['expressions']:raise TurnRejected('expression_mismatch','表达类型或字段与计划不一致。')
-                required={'text':{'text'},'sticker':{'sticker_id'},'reaction':{'event_id','reaction_id','operation'}}[kind]
+                required={'text':{'text'},'sticker':{'sticker_id'},'reaction':{'event_id','reaction_id','operation'},
+                    'voice':{'asset_id'},'video':{'asset_id'},'file':{'asset_id'},'ai_voice':{'text','character_id'},'qq_action':{'tool','action','params'}}[kind]
                 if required-set(b):raise TurnRejected('expression_mismatch','表达缺少必要内容。')
                 if kind=='reaction' and b['event_id']!=data['target_event_id']:raise TurnRejected('target_mismatch','回应目标与计划不一致。')
                 if kind=='text' and i and (b.get('quote') or b.get('mention_user_ids')):raise TurnRejected('repeated_addressing','同一轮仅首条按需引用或 @；改变目标需重新规划。')
+                if kind=='qq_action':
+                    from .mcp_qq_catalog import CATALOG
+                    from .mcp_qq import OUTBOUND
+                    import jsonschema
+                    spec=CATALOG.get(b['tool'],{});entry=spec.get('actions',{}).get(b['action'])
+                    if not entry or b['action'] not in OUTBOUND or not grant['scope'].get(spec.get('permission')):
+                        raise TurnRejected('qq_action_invalid','聊天队列只接受已授权的发送或互动动作。')
+                    if not jsonschema.Draft202012Validator(entry['params']).is_valid(b['params']):
+                        raise TurnRejected('qq_action_invalid','动作参数格式无效，请按对应工具的参数定义修正。')
+                if kind in ('voice','video','file'):self.chat.qq.media.get(grant,b['asset_id'],kind)
+                if kind=='ai_voice' and ':direct:' in self.chat.row(sid)['conversation_id']:
+                    raise TurnRejected('ai_voice_group_only','QQ AI 语音只支持群聊。')
             self.check(p,cancel,cooldown=True)
             if any(b['kind']=='text' for b in bubbles) and hasattr(self.chat,'learning'):
                 prepared=self.public(p)
@@ -414,8 +458,10 @@ class ChatTurns:
                                 result=self.chat.send(grant,params,cancel)
                             elif b['kind']=='sticker':
                                 result,_=self.chat.media.call(grant,'send_chat_sticker',dict(session_id=sid,idempotency_key=key,sticker_id=b['sticker_id']),cancel)
-                            else:
+                            elif b['kind']=='reaction':
                                 result=self.chat.reactions.request(grant,dict(session_id=sid,idempotency_key=key,**{k:v for k,v in b.items() if k!='kind'}),cancel)
+                            else:
+                                result=self.chat.qq.send_bubble(grant,self.chat.row(sid),b,key,cancel)
                             item['state']=result.get('state','UNKNOWN');item['receipt']=result
                             if item['state'] not in ('SUCCEEDED','NOOP'):
                                 try:self.check(p,cancel)

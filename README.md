@@ -4,11 +4,27 @@
 
 **把 QQ / 微信资料接入几乎所有的桌面版 Agent，也让它在 QQ 里成为群友。**
 
-[下载](#下载) · [快速开始](#快速开始) · [Agent 配置教程](doc/AGENT_SETUP.md) · [使用场景](#使用场景) · [完整文档](#常见问题与文档)
+[Linux 终端版](README.linux.md) · [下载](#下载) · [快速开始](#快速开始) · [Agent 配置教程](doc/AGENT_SETUP.md) · [使用场景](#使用场景) · [完整文档](#常见问题与文档)
 
 Tulpa 在本机整理聊天、图片和文件，让 Agent 按你授权的范围查资料、追溯消息，或带着自定义人格参与 QQ 群聊。已有 Agent 选 MCP 轻量版；想直接在 Tulpa 里提问，选完整版。
 
-**Windows 10 / 11 x64。** 微信支持读取、回复草稿与复制，不能发送。QQ 持续群聊需要独立运行的 OneBot 服务、相应授权，以及持续执行的外部 Agent。
+**桌面发行版：Windows 10 / 11 x64；Linux：x86_64 / ARM64 终端源码版。** 微信支持读取、回复草稿与复制，不能发送。QQ 持续群聊需要独立运行的 OneBot 服务、相应授权，以及持续执行的外部 Agent。
+
+## Linux 终端版
+
+在 Linux 安装 Python 3.13 或 `uv` 后，进入源码目录运行：
+
+```sh
+./tulpa
+```
+
+首次自动安装依赖、启动后台并打开 TUI；退出界面后后台继续运行。
+提供 CLI / TUI、原有业务 API、MCP、Linux 原生读取器、可选 OCR / 语音 / Office 组件、
+用户级 systemd 服务，以及 SL 本地托管和 Docker 托管。没有桌面时可用浏览器中的 noVNC 扫码。
+多实例各有独立端口、账号数据、SL 容器和 MCP 授权；新增私聊、图片导入、SL 扩展工具及授权编辑。
+
+安装与限制见 [Linux 教程](README.linux.md)、[使用说明](doc/LINUX_TERMINAL.md)；
+开发分工见 [模型贡献记录](doc/LINUX_CONTRIBUTORS.md)。下方桌面下载和启动教程继续适用于 Windows。
 
 ## 使用场景
 
@@ -153,4 +169,3 @@ Tulpa 自有代码采用 [MIT License](LICENSE)，第三方组件、模型与客
 - [qq-bridge](https://github.com/Derpyu520/qq-bridge)：群聊行为与提示词设计参考；小鲸鱼基于其角色卡，由 Tulpa 维护者改编，保留来源和 MIT 许可。
 - [QQ-agent](https://github.com/K0nd1us/QQ-agent)：表情收藏、语义笔记、候选与用量反馈的设计参考；Tulpa 按自身授权和媒体校验机制独立实现。
 - [SnowLuma](https://github.com/SnowLuma/SnowLuma)：提供 QQ / OneBot 接入能力，需独立安装并遵循其许可。
-

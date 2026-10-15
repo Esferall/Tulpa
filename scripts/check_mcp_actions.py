@@ -31,8 +31,9 @@ class Fixture(BaseHTTPRequestHandler):
         body=json.loads(self.rfile.read(int(self.headers['Content-Length'])))
         action=self.path.removeprefix('/')
         if action=='get_login_info':data=dict(user_id=111)
-        elif action=='get_group_info':data=dict(group_id=222,group_name='Isolated test')
-        elif action=='get_group_member_info':data=dict(group_id=222,user_id=body['user_id'],nickname='Fixture',role=self.actor if body['user_id']==111 else 'member')
+        elif action=='get_group_list':data=[dict(group_id=222),dict(group_id=555)]
+        elif action=='get_group_info':data=dict(group_id=body['group_id'],group_name='Isolated test')
+        elif action=='get_group_member_info':data=dict(group_id=body['group_id'],user_id=body['user_id'],nickname='Fixture',role=self.actor if body['user_id']==111 else 'member')
         elif action=='get_group_system_msg':data=[dict(group_id=222,checked=False,flag='fixture-join',requester_uin=333,sub_type='add')]
         elif action.startswith(('send_','set_')):
             self.writes.append((action,body))
@@ -125,6 +126,23 @@ def main():
                 try:call(send,'send_qq_message',**dict(payload,idempotency_key='after-revoke'))
                 except ValueError:pass
                 else:raise AssertionError('Revoked grant accepted')
+                live=ui.post('/api/mcp/connections',headers=headers,json=dict(name='Live empty group',platforms=['qq'],conversations=[['qq','111:group:555']],send=True,chat=True,manage=True,onebot=True)).json()
+                args=dict(conversation_id='111:group:555',action='rename',group_name='Live renamed',idempotency_key='live-empty-rename')
+                r=call(live,'read_qq_group',conversation_id=args['conversation_id'],view='info')
+                assert 'error' not in r,r
+                r=call(live,'manage_qq_group',**args);assert r['state']=='SUCCEEDED',r
+                before=len(Fixture.writes)
+                assert call(live,'manage_qq_group',**args)['state']=='SUCCEEDED'
+                for cid in ('111:group:222','999:group:555','111:direct:555'):
+                    assert 'error' in call(live,'manage_qq_group',**dict(args,conversation_id=cid,idempotency_key='live-denied-'+cid))
+                    assert 'error' in call(live,'read_qq_group',conversation_id=cid,view='info')
+                Fixture.actor='member'
+                assert 'error' in call(live,'manage_qq_group',**dict(args,idempotency_key='live-no-role'))
+                Fixture.actor='owner'
+                assert len(Fixture.writes)==before
+                expired_live=grant(send=True,chat=True,manage=True,onebot=True,end='2026-09-01')
+                assert 'error' in call(expired_live,'manage_qq_group',**dict(args,conversation_id='111:group:222'))
+                assert 'error' in call(expired_live,'read_qq_group',conversation_id='111:group:222',view='info')
                 records=ui.get('/api/mcp/operations').json()['operations'];assert records and all(o['state']!='PENDING' for o in records)
                 assert ui.post('/api/mcp/operations/'+results[0]['id']+'/decision',headers=headers,json={'allow':True}).status_code==404
     finally:server.shutdown();server.server_close();invalidate_availability()

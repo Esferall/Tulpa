@@ -1,7 +1,4 @@
-"""User-authorized configuration of a selected local SnowLuma installation.
-
-No package download, component copying, or Agent-facing management API.
-"""
+"""User-authorized local or Docker SnowLuma management, never Agent-facing."""
 import atexit
 import hashlib
 import json
@@ -14,10 +11,11 @@ import time
 from .snowluma_secure import (ManagedError, SecretVault, atomic_json, file_lock,
                              local_path, private_directory, read_json)
 from .snowluma_local import LocalInstallation, fingerprint
-from .snowluma_runtime import SnowLumaAPI, WindowsRuntime, free_port, port_available
+from .snowluma_runtime import SnowLumaAPI, default_runtime, free_port, port_available
 
 
 PHASES = dict(idle='请选择 SnowLuma 文件夹', detecting='核对本地运行文件',
+    pulling='准备 Docker 镜像',
     starting='后台启动', initializing='首次初始化', choosing='选择 QQ',
     waiting_qq='等待打开 QQ', waiting_login='等待 QQ 登录', configuring='配置 OneBot',
     verifying='验证连接', ready='QQ 已就绪', reconnecting='连接恢复中',
@@ -30,6 +28,8 @@ def load_manifest():
 
 def consent_key(manifest):
     value = {k:manifest[k] for k in ('version','adapter','agreements','scope')}
+    if manifest.get('mode') == 'managed_docker':
+        value['docker'] = manifest['docker']
     return hashlib.sha256(json.dumps(value, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
 
 
@@ -38,12 +38,12 @@ class ManagedSnowLuma:
                  installer_factory=LocalInstallation, vault_factory=SecretVault,
                  on_invalidated=lambda:None, probe=None, poll_seconds=3,
                  login_timeout=180, event_timeout=20, auto_select_single=True,
-                 check_account=lambda account:None):
+                 check_account=lambda account:None, docker_runtime=None, docker_api_factory=None):
         self.root = local_path(root)
         self.directory = self.root/'data/snowluma-managed'
         self.state_path = self.directory/'state.json'
         self.manifest = manifest if manifest is not None else load_manifest()
-        self.runtime = runtime or WindowsRuntime()
+        self.runtime = runtime or default_runtime()
         self.api_factory, self.installer_factory = api_factory, installer_factory
         self.installations = installer_factory(self.manifest, self.directory)
         self.previews = {}
@@ -58,15 +58,24 @@ class ManagedSnowLuma:
         self.mutex = threading.RLock()
         self.api = None
         self.heartbeat = None
+        from .snowluma_docker_managed import DockerManaged
+        self.docker = DockerManaged(self, runtime=docker_runtime,
+            **({'api_factory':docker_api_factory} if docker_api_factory else {}))
 
     def state(self):
         return read_json(self.state_path, dict(schema=1, phase='idle', enabled=False, generation=0))
 
     def _require_permission(self):
+        if self.state().get('backend') == 'docker':
+            from .snowluma_docker import release
+            release(self.manifest)
+            return
         if self.manifest.get('mode') != 'user_selected_local_directory':
             raise ManagedError('unsupported_mode', '当前仅支持配置用户明确选择的本地 SnowLuma 文件夹。')
 
     def inspect(self, folder):
+        if self.state().get('backend') == 'docker':
+            raise ManagedError('backend_bound', '此 Tulpa 已绑定 Docker 托管，请在该模式中启动或重新授权。')
         self._require_permission()
         try:receipt = self.installations.inspect(folder)
         except ManagedError:raise
@@ -84,8 +93,9 @@ class ManagedSnowLuma:
                     **{k:receipt[k] for k in ('folder','version','mode','message')})
 
     def _consented(self, state):
-        return (state.get('consent', {}).get('fingerprint') == consent_key(self.manifest)
-                and state.get('consent', {}).get('scope') == self.manifest['scope']
+        manifest = self.docker.manifest if state.get('backend') == 'docker' else self.manifest
+        return (state.get('consent', {}).get('fingerprint') == consent_key(manifest)
+                and state.get('consent', {}).get('scope') == manifest['scope']
                 and bool(state.get('installation'))
                 and state.get('consent', {}).get('source') == state['installation'].get('fingerprint'))
 
@@ -116,20 +126,26 @@ class ManagedSnowLuma:
             'progress','ports','verified_at','updated_at','history','choices','selection_required') if k in state}
         owner = state.get('owner') or {}
         selected = state.get('selected') or {}
+        manifest = self.docker.manifest if state.get('backend') == 'docker' else self.manifest
         public.update(phase=phase, phase_label=PHASES.get(phase,'状态未知'),
+            backend=state.get('backend','local'), supported_backends=['local','docker'] if os.name!='nt' else ['local'],
             version=self.manifest['version'], real_pc_verified=self.manifest['compatibility']['real_pc_verified'],
             available=self.manifest.get('mode') == 'user_selected_local_directory',
-            consent_current=self._consented(state), has_consent=bool(state.get('consent')), consent_fingerprint=consent_key(self.manifest),
-            consent_at=state.get('consent',{}).get('at'), agreements=self.manifest['agreements'],
-            scope=self.manifest['scope'], service_pid=owner.get('pid'), qq_pid=selected.get('pid'),
+            consent_current=self._consented(state), has_consent=bool(state.get('consent')), consent_fingerprint=consent_key(manifest),
+            consent_at=state.get('consent',{}).get('at'), agreements=manifest['agreements'],
+            scope=manifest['scope'], service_pid=owner.get('pid'), qq_pid=selected.get('pid'),
             storage=str(self.directory), folder=state.get('installation',{}).get('folder',''), qq_ready=phase=='ready',
             authorization_note='',
-            security_note='Tulpa 凭据由 Windows 当前用户 DPAPI 保护。所选 SnowLuma 的配置目录会保存它运行所需的明文 Token，并限制为当前用户和系统访问。')
+            security_note=('Tulpa 凭据由 Windows 当前用户 DPAPI 保护。' if os.name=='nt' else 'Tulpa 凭据使用本机 AES-GCM 密钥加密；密钥文件权限 600，目录权限 700。')+'所选 SnowLuma 配置仍保存运行必需的明文 Token。')
+        if state.get('backend') == 'docker':
+            public.update(self.docker.public(state))
         if public.get('qq_ready') and (not self.thread or not self.thread.is_alive()):
             public.update(qq_ready=False, phase='reconnecting', phase_label=PHASES['reconnecting'])
         return public
 
     def begin(self, body):
+        if self.state().get('backend') == 'docker':
+            raise ManagedError('backend_bound', '当前实例绑定 Docker，请使用 Docker 托管流程。')
         if set(body) != {'accepted','fingerprint','selection_id'} or body['accepted'] is not True:
             raise ManagedError('consent_required', '请先检测本地文件夹，再主动勾选协议与自动配置授权。')
         with self.mutex:
@@ -170,12 +186,16 @@ class ManagedSnowLuma:
                 raise ManagedError('consent_required', '需要重新主动同意，不能靠重试恢复已撤销授权。')
             if self.thread and self.thread.is_alive() and state.get('enabled'):
                 return self.status()
-            state.update(enabled=True, generation=state.get('generation',0)+1, phase='detecting', code='', message='')
+            if self.thread and self.thread.is_alive():
+                raise ManagedError('stopping', '上一轮托管正在停止，请稍候再启动。', retryable=True)
+            state.update(mode='managed', enabled=True, generation=state.get('generation',0)+1, phase='detecting', code='', message='')
             self._write(state)
         self.launch()
         return self.status()
 
     def select(self, choice_id):
+        if self.state().get('backend') == 'docker':
+            raise ManagedError('selection_not_required', 'Docker 托管会自动核对容器内唯一账号，请打开扫码入口登录。')
         self._require_permission()
         with file_lock(self.directory/'state.lock'):
             state = self.state()
@@ -209,6 +229,8 @@ class ManagedSnowLuma:
         # Worker cleanup only stops the exact owned SnowLuma, never QQ/external.
         if self.thread and self.thread is not threading.current_thread():
             self.thread.join(5)
+        if state.get('backend') == 'docker' and state.get('owner') and not (self.thread and self.thread.is_alive()):
+            self.docker.runtime.stop(state['owner'], state['installation'], state['instance'], state['ports'])
         return self.status()
 
     def use_external(self):
@@ -278,6 +300,8 @@ class ManagedSnowLuma:
     def _work(self, generation):
         check = lambda: self._check(generation)
         state = check()
+        if state.get('backend') == 'docker':
+            return self.docker.work(generation)
         self._set(generation, 'detecting')
         install = local_path(state['installation']['folder'])
         if not (state.get('owner') and self.runtime.owned(state['owner'],install,state['instance'])) and self.runtime.hooks():
@@ -341,7 +365,7 @@ class ManagedSnowLuma:
                 for proc in self.api.processes():
                     pid = proc.get('pid')
                     identity = self.runtime.identity(pid)
-                    if not identity or Path(identity['executable']).name.lower() != 'qq.exe':
+                    if not identity or Path(identity['executable']).name.lower() not in (('qq.exe',) if os.name=='nt' else ('qq',)):
                         continue
                     account = self.api.probe(pid)
                     # No nickname guesses. Empty native path can still be tied
@@ -487,7 +511,10 @@ class ManagedSnowLuma:
         if time.time()-state.get('verified_at',0)>12:
             raise ManagedError('managed_not_ready', 'QQ 托管身份验证已过期。')
         if fresh:
-            self._verify_identity(state['instance'], state['owner'], local_path(state['installation']['folder']), state['selected'], state['account'])
+            if state.get('backend') == 'docker':
+                self.docker.verify(state)
+            else:
+                self._verify_identity(state['instance'], state['owner'], local_path(state['installation']['folder']), state['selected'], state['account'])
         if not self.heartbeat or self.heartbeat.status().get('state') != 'connected':
             raise ManagedError('event_disconnected', 'QQ 事件通道未就绪，未执行操作。')
 

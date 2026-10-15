@@ -12,7 +12,7 @@ import subprocess
 import zipfile
 
 ROOT = Path(__file__).resolve().parents[1]
-PRIVATE_ROOTS = {'.git', '.venv', '.tmp', 'data', 'imports', 'exports', 'reports', 'release', 'build'}
+PRIVATE_ROOTS = {'.git', '.venv', '.tmp', 'data', 'imports', 'exports', 'reports', 'release', 'build', 'instances'}
 SECRET = re.compile(r'(?:sk-[A-Za-z0-9]{24,}|gh[pousr]_[A-Za-z0-9]{30,}|github_pat_[A-Za-z0-9_]{30,}|-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----)')
 PERSONAL_PATH = re.compile(r'[A-Za-z]:[\\/]Users[\\/](?!Public(?:[\\/]|\b)|Default(?:[\\/]|\b))[^\\/\s<>]+', re.I)
 TEXT_EXT = {'.py', '.js', '.cjs', '.css', '.html', '.md', '.txt', '.json', '.toml', '.yml', '.yaml', '.cs', '.ps1', '.example', '.config'}

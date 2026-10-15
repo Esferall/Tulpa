@@ -63,6 +63,9 @@ def resume_checkpoint(platform,old,cold,account):
 
 def process_names():
     """Read Windows process names without spawning a shell every poll."""
+    if os.name != 'nt':
+        from .platform_process import linux_processes
+        return {Path(item['executable']).name.lower() for item in linux_processes()}
     import ctypes
     from ctypes import wintypes as w
     class Entry(ctypes.Structure):
@@ -110,7 +113,7 @@ class Worker:
         self.last_stage='runtime'
         self.process=subprocess.Popen([sys.executable,str(ROOT/'scripts/live_reader.py'),platform],cwd=ROOT,
             env=dict(os.environ,PYTHONUTF8='1'),stdin=subprocess.PIPE,stdout=subprocess.PIPE,
-            stderr=subprocess.DEVNULL,text=True,encoding='utf-8',creationflags=subprocess.CREATE_NO_WINDOW)
+            stderr=subprocess.DEVNULL,text=True,encoding='utf-8',creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
         self.output=queue.Queue(maxsize=2)
         def receive():
             try:
@@ -194,7 +197,7 @@ class LiveManager:
         with self.guard:
             if time.monotonic()-self.process_checked>3:
                 self.names=process_names();self.process_checked=time.monotonic()
-            return bool(self.names & ({'qq.exe'} if p=='qq' else {'weixin.exe','wechat.exe'}))
+            return bool(self.names & ({'qq.exe','qq'} if p=='qq' else {'weixin.exe','wechat.exe','wechat','weixin'}))
 
     def worker(self, p):
         with self.guard:
@@ -293,6 +296,7 @@ class LiveManager:
 def install_live_routes(app,store,same_origin):
     from fastapi import Request,HTTPException
     manager=LiveManager(store)
+    app.state.tulpa_live=manager
     @app.get('/api/live-status')
     def live_status(request:Request):same_origin(request);return manager.snapshot()
     @app.put('/api/live-settings')

@@ -5,7 +5,7 @@ from urllib.parse import urlparse
 import anyio
 from fastapi import HTTPException, Request
 
-from .mcp_access import MCPAccess, AccessDenied
+from .mcp_access import MCPAccess, AccessDenied, GrantConflict
 from .mcp_server import MCPService
 from .store import Store
 
@@ -68,17 +68,27 @@ def install_mcp_routes(app, store=None):
     @app.post('/api/mcp/connections')
     def create(request: Request, body: dict):
         local(request, True)
+        from .mcp_qq_permissions import live_grant
         try:
             if not isinstance(body.get('platforms'),list) or any(p not in ('qq','wechat') for p in body['platforms']):
                 raise ValueError('请选择允许访问的平台。')
             with store.connect() as db:
                 for platform in body.get('platforms',[]):
-                    if platform=='qq' and body.get('chat') is True and body.get('send') is True:continue
+                    if platform=='qq' and live_grant(body):continue
                     if not db.execute('SELECT 1 FROM messages WHERE platform=? LIMIT 1',(platform,)).fetchone():
                         raise ValueError('请先导入所选平台的聊天，确认来源账号后再创建连接。')
-            return access.create(body)
+            result=access.create(body)
+            if body.get('qq_friends'):service.tools.chat.receiver.start()
+            return result
         except ValueError as exc:
             raise HTTPException(400, str(exc)) from None
+
+    @app.put('/api/mcp/connections/{gid}')
+    def update_permissions(gid: str, request: Request, body: dict):
+        local(request, True)
+        try:return service.update_permissions(gid, body)
+        except GrantConflict as exc:raise HTTPException(409, str(exc)) from None
+        except ValueError as exc:raise HTTPException(400, str(exc)) from None
 
     def token_for(body):
         if set(body)!={'token'} or not isinstance(body['token'],str):raise HTTPException(400,'连接凭据字段无效。')

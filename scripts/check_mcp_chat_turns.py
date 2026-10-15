@@ -169,6 +169,91 @@ def main():
                     finally:halt.set();worker.join()
                     results.append('unrelated traffic does not starve a selected response')
 
+                    # A selected speaker can move to another conversation while
+                    # the Agent composes. Native addressing, not speaker identity,
+                    # distinguishes that conversation and its unmarked followups.
+                    clear_budget()
+                    other=add('另一段对话',uid=444)
+                    with access.connect() as db:
+                        other_mid=db.execute('SELECT message_id FROM chat_inbox WHERE id=?',(other,)).fetchone()[0]
+                    last=add('请回答这条问题');time.sleep(.18);batch=read()
+                    add(uid=333,segments=[dict(type='at',data={'qq':'444'}),dict(type='text',data={'text':'先聊你那件事'})])
+                    add('接着补充旁边的话题')
+                    p=plan(last,batch=batch);assert p.get('state')=='READY',p
+                    add(uid=333,segments=[dict(type='reply',data={'id':other_mid}),dict(type='text',data={'text':'这条也在说另一件事'})])
+                    add('还是刚才那件旁边的事')
+                    before_send=len(ReactionBot.sent);out=send(p)
+                    assert out['state']=='SUCCEEDED' and len(ReactionBot.sent)==before_send+1,out
+                    results.append('same-speaker side conversations and their followups do not invalidate plan or send')
+
+                    # The collection gate must use the same routing as dispatch.
+                    # Copy only fixture times: an old question is quiet while a
+                    # side conversation is arbitrarily recent, without a race.
+                    with access.connect() as db:
+                        pending=[dict(r) for r in db.execute('SELECT * FROM chat_inbox WHERE session_id=? AND id>=? ORDER BY id',(sid,last))]
+                    for item in pending:
+                        payload=json.loads(item['payload'])
+                        payload['received_at']=0 if item['id']==last else time.time()+60
+                        item['payload']=json.dumps(payload)
+                    collected=tools.chat.turns.collection(tools.chat.row(sid),pending,2,time.monotonic())
+                    assert collected['reason']=='quiet' and collected['ready_to_send'],collected
+
+                    # Returning to the selected topic still invalidates the
+                    # answer, including native mixed addressing and late replies.
+                    for mode in ('quote','mention','term','reply_chain','continuation'):
+                        last=add('请回答原问题');time.sleep(.18)
+                        read()
+                        target_mid=tools.chat.response_target(tools.chat.row(sid),last)['onebot_message_id']
+                        if mode in ('reply_chain','continuation'):
+                            supplement=add(uid=555,segments=[dict(type='reply',data={'id':target_mid}),dict(type='text',data={'text':'补充条件'})])
+                            read()
+                            supplement_mid=tools.chat.response_target(tools.chat.row(sid),supplement)['onebot_message_id']
+                        else:
+                            add(uid=333,segments=[dict(type='at',data={'qq':'444'}),dict(type='text',data={'text':'旁边的话题'})])
+                        time.sleep(.18)
+                        p=plan(last,**({'topic_terms':['原题条件']} if mode=='term' else {}));assert p.get('state')=='READY',p
+                        if mode=='quote':
+                            segments=[dict(type='reply',data={'id':target_mid}),dict(type='at',data={'qq':'444'}),dict(type='text',data={'text':'原题更正'})]
+                        elif mode=='mention':
+                            segments=[dict(type='at',data={'qq':'444'}),dict(type='at',data={'qq':'111'}),dict(type='text',data={'text':'更正一下'})]
+                        elif mode=='term':
+                            segments=[dict(type='at',data={'qq':'444'}),dict(type='text',data={'text':'原题条件有变化'})]
+                        elif mode=='reply_chain':
+                            segments=[dict(type='reply',data={'id':supplement_mid}),dict(type='text',data={'text':'再改一个条件'})]
+                        else:segments=[dict(type='text',data={'text':'还要补充一个条件'})]
+                        correction=add(uid=555 if mode=='continuation' else 666 if mode=='reply_chain' else 333,segments=segments)
+                        prior=len(ReactionBot.sent);out=send(p)
+                        assert out.get('error_code')=='stale' and correction in out['refresh_event_ids'] and len(ReactionBot.sent)==prior,(mode,out)
+                    results.append('quiet collection ignores side traffic; quotes, mentions, topic terms, reply chains and corrections still block stale sends')
+
+                    # Refresh delivery can be acknowledged without fetching it
+                    # again, but cannot skip a hole before its last-20 window.
+                    clear_budget()
+                    page=call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,limit=50)
+                    while page['has_more']:
+                        page=call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,limit=50,
+                                  acknowledge_through_id=page['read_through_id'])
+                    call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,acknowledge_through_id=page['read_through_id'])
+                    cursor=tools.chat.row(sid)['cursor'];fresh=add('补读后不应再次交付')
+                    refreshed=read()
+                    assert refreshed['session']['cursor']==cursor and refreshed['session']['offered']==fresh
+                    next_call=refreshed['chat_prompt']['continue_with']
+                    assert next_call['arguments']['acknowledge_through_id']==fresh
+                    idle=call(next_call['tool'],**dict(next_call['arguments'],timeout_seconds=1,quiet_seconds=0))
+                    assert idle['event']=='idle' and not idle['messages'],idle
+                    unread=[add('未读分页 '+str(i),uid=444) for i in range(25)]
+                    refreshed=read()
+                    assert refreshed['context']['messages'][0]['id']==unread[5]
+                    assert refreshed['session']['offered']==fresh and refreshed['session']['cursor']==fresh
+                    page=call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,limit=3)
+                    assert [m['id'] for m in page['messages']]==unread[:3] and page['has_more']
+                    refreshed=read();next_call=refreshed['chat_prompt']['continue_with']
+                    assert refreshed['session']['cursor']==fresh and next_call['arguments']['acknowledge_through_id']==unread[2]
+                    remaining=call(next_call['tool'],**dict(next_call['arguments'],timeout_seconds=1,quiet_seconds=0,limit=50))
+                    assert [m['id'] for m in remaining['messages']]==unread[3:]
+                    call('wait_chat_messages',session_id=sid,timeout_seconds=1,quiet_seconds=0,acknowledge_through_id=remaining['read_through_id'])
+                    results.append('refresh offers contiguous input for explicit ACK; last-20 context never skips unread or unacknowledged pages')
+
                     # Real spacing, one immutable queue and no duplicate dispatch.
                     clear_budget();last=add('引用和点名的目标');time.sleep(.18);p=plan(last)
                     assert p.get('state')=='READY',p

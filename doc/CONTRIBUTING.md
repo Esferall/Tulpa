@@ -1,5 +1,7 @@
 # 参与开发
 
+Linux 的环境、终端接口、测试与源码打包见 [Linux 开发指南](LINUX_CONTRIBUTING.md)，模型分工见 [贡献记录](LINUX_CONTRIBUTORS.md)。以下为原桌面开发流程。
+
 使用 Windows x64 和 Python 3.13。安装、运行和构建步骤见 [DESKTOP.md](DESKTOP.md)，测试入口见 [VALIDATION.md](VALIDATION.md)。
 
 ## 目录与开发入口

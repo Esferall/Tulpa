@@ -107,7 +107,8 @@ class MCPActions:
         signature = hashlib.sha256(dump([kind,cid,params]).encode()).hexdigest()
         with _execution:
             if guard:guard()
-            grant = self.access.by_id(grant['id'], source=target_resolver is None)
+            self.access.ensure_revision(grant)
+            self.access.by_id(grant['id'], source=target_resolver is None)
             (target_resolver or self.scoped_target)(grant,cid,kind)
             with self.access.connect() as db:
                 old = db.execute('SELECT * FROM operations WHERE grant_id=? AND request_key=?', (grant['id'],key)).fetchone()
@@ -117,6 +118,7 @@ class MCPActions:
                 return self.get(old['id'], grant['id'])
             prepared, summary, target = self.prepare(grant, cid, kind, params, target_resolver=target_resolver, send_preparer=send_preparer)
             self.access.by_id(grant['id'], source=target_resolver is None)
+            self.access.ensure_revision(grant)
             if guard:guard()
             if cancel.is_set():
                 raise ValueError('调用已取消，未执行操作。')
@@ -129,6 +131,7 @@ class MCPActions:
             dispatched = False
             try:
                 self.access.by_id(grant['id'], source=target_resolver is None)
+                self.access.ensure_revision(grant)
                 if guard:guard()
                 if cancel.is_set():raise ValueError('调用已取消，未执行。')
                 if kind=='send':

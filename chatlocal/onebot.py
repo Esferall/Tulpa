@@ -8,6 +8,7 @@ from urllib.parse import urlparse
 import httpx
 from dotenv import dotenv_values
 from .config import ROOT
+from .mcp_qq_catalog import READ_APIS, WRITE_APIS
 
 
 class OneBotError(ValueError):
@@ -24,8 +25,10 @@ class OneBotUncertain(OneBotError):
 READS = frozenset(('get_login_info', 'get_version_info', 'get_group_info', 'get_group_list',
     'get_group_member_info', 'get_group_member_list', 'get_group_system_msg',
     '_get_group_notice', 'get_essence_msg_list', 'get_group_file_system_info',
-    'get_group_root_files', 'get_group_files_by_folder', 'get_group_file_url', 'get_image', 'fetch_custom_face_detail'))
+    'get_group_root_files', 'get_group_files_by_folder', 'get_group_file_url', 'get_image', 'fetch_custom_face_detail', 'get_friend_list'))
 WRITES = frozenset(('set_group_ban', 'set_group_kick', 'set_group_name', 'set_group_add_request', 'add_custom_face', 'set_msg_emoji_like'))
+READS = READS | frozenset(READ_APIS)
+WRITES = WRITES | frozenset(WRITE_APIS)
 
 
 def configuration(root=None):

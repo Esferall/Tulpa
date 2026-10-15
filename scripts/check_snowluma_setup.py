@@ -176,7 +176,8 @@ def main():
             # Existing grants are checked without expanding or rewriting them.
             store=Store(root/'scope/messages.db');access=MCPAccess(store)
             with access.connect() as db:
-                db.execute('INSERT INTO grants VALUES(?,?,?,?,?,?,?,?)',('grant','fixture','hash','{}','epoch',json.dumps({'qq':'67890'}),0,0))
+                db.execute('INSERT INTO grants(id,name,token_hash,scope,epoch,accounts,created_at,revoked) VALUES(?,?,?,?,?,?,?,?)',
+                           ('grant','fixture','hash','{}','epoch',json.dumps({'qq':'67890'}),0,0))
             service=SimpleNamespace(access=access)
             try:check_account_scope(service,'12345')
             except SetupError as exc:assert exc.code=='scope_mismatch'

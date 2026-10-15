@@ -9,10 +9,13 @@ from contextlib import contextmanager
 
 from .client_accounts import bound_account
 from .retrieval import Plan, date_bound
+from .mcp_qq_permissions import QQ_FLAGS, MEDIA_FLAGS as ATTACHMENT_FLAGS, live_grant
 
 CHAT_MEDIA_FLAGS = ('chat_images', 'chat_sticker_send', 'chat_sticker_collect')
 CHAT_EXTRA_FLAGS = ('chat_reactions',)
-CHAT_MEDIA_TOOLS = ('read_chat_image','list_chat_stickers','read_chat_sticker','note_chat_sticker','send_chat_sticker','collect_chat_sticker')
+PERMISSION_FLAGS = ('media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'chat',
+                    *CHAT_MEDIA_FLAGS, *CHAT_EXTRA_FLAGS, *QQ_FLAGS)
+CHAT_MEDIA_TOOLS = ('read_chat_image','import_chat_image','list_chat_stickers','read_chat_sticker','note_chat_sticker','send_chat_sticker','collect_chat_sticker')
 
 DEFAULT_PORT = 18777
 
@@ -22,6 +25,10 @@ class AccessDenied(ValueError):
 
 
 class RateLimited(ValueError):
+    pass
+
+
+class GrantConflict(ValueError):
     pass
 
 
@@ -44,6 +51,8 @@ class MCPAccess:
                     messages INTEGER NOT NULL DEFAULT 0);
                 CREATE INDEX IF NOT EXISTS calls_budget ON calls(grant_id,tool,at);
             ''')
+            if 'revision' not in {r[1] for r in db.execute('PRAGMA table_info(grants)')}:
+                db.execute('ALTER TABLE grants ADD COLUMN revision INTEGER NOT NULL DEFAULT 0')
 
     @contextmanager
     def connect(self):
@@ -64,6 +73,8 @@ class MCPAccess:
     def configure(self, enabled, port):
         if type(enabled) is not bool or type(port) is not int or not 1024 <= port <= 65535:
             raise ValueError('启用状态或端口无效；端口范围 1024–65535。')
+        from .terminal_instances import validate_mcp_port
+        validate_mcp_port(self.store.path.parent.parent, port)
         with self.connect() as db:
             db.execute('UPDATE settings SET enabled=?,port=? WHERE id=1', (enabled, port))
 
@@ -75,7 +86,7 @@ class MCPAccess:
         return {p: bound_account(self.store, p) or '' for p in platforms}
 
     def create(self, body):
-        fields = {'name', 'platforms', 'conversations', 'all_conversations', 'start', 'end', 'media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'chat', *CHAT_MEDIA_FLAGS, *CHAT_EXTRA_FLAGS}
+        fields = {'name', 'platforms', 'conversations', 'all_conversations', 'start', 'end', 'media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'chat', *CHAT_MEDIA_FLAGS, *CHAT_EXTRA_FLAGS, *QQ_FLAGS}
         if not isinstance(body, dict) or set(body) - fields:
             raise ValueError('连接配置字段无效。')
         name = body.get('name', '')
@@ -85,16 +96,23 @@ class MCPAccess:
         if not isinstance(platforms, list) or not platforms or any(p not in ('qq', 'wechat') for p in platforms):
             raise ValueError('请选择允许访问的平台。')
         conversations = body.get('conversations', [])
+        if not isinstance(conversations,list) or len(conversations)>500:
+            raise ValueError('请选择最多 500 个会话。')
         # Live chat can be authorized before importing any native chat history.
         chat_account = None
         live_groups = set()
-        if body.get('chat') is True and body.get('send') is True and 'qq' in platforms:
+        if live_grant(body) and 'qq' in platforms:
             from .onebot import Client
             client = Client(timeout=3)
             chat_account = client.login()
             if not body.get('all_conversations'):
                 live_groups = {f'{chat_account}:group:{g["group_id"]}' for g in client.call('get_group_list', {})
                                if isinstance(g,dict) and str(g.get('group_id','')).isdigit()}
+                # Only fetch the friend directory when direct conversations are
+                # selected; legacy group grants need no new upstream endpoint.
+                if any(isinstance(p,list) and len(p)==2 and isinstance(p[1],str) and ':direct:' in p[1] for p in conversations):
+                    live_groups.update(f'{chat_account}:direct:{f["user_id"]}' for f in client.call('get_friend_list', {})
+                                       if isinstance(f,dict) and str(f.get('user_id','')).isdigit())
         if not isinstance(conversations, list) or len(conversations) > 500:
             raise ValueError('请选择最多 500 个会话。')
         selections = []
@@ -107,7 +125,7 @@ class MCPAccess:
             selection = json.dumps(pair, ensure_ascii=False)
             if selection not in selections:
                 selections.append(selection)
-        for flag in ('all_conversations', 'media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'chat', *CHAT_MEDIA_FLAGS, *CHAT_EXTRA_FLAGS):
+        for flag in ('all_conversations', 'media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'chat', *CHAT_MEDIA_FLAGS, *CHAT_EXTRA_FLAGS, *QQ_FLAGS):
             if flag in body and type(body[flag]) is not bool:
                 raise ValueError('权限开关必须为布尔值。')
         if body.get('all_conversations'):
@@ -131,17 +149,8 @@ class MCPAccess:
         if start is not None and end is not None and start >= end:
             raise ValueError('开始日期不能晚于截止日期。')
         scope = dict(platforms=sorted(set(platforms)), conversations=selections, **dates,
-                     **{k: body.get(k, False) for k in ('media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'chat', *CHAT_MEDIA_FLAGS, *CHAT_EXTRA_FLAGS)})
-        if (scope['send'] or scope['manage']) and 'qq' not in platforms:
-            raise ValueError('发送和群管理需要选择 QQ 平台。')
-        if scope['chat'] and not scope['send']:
-            raise ValueError('持续聊天需要同时允许直接发送 QQ 消息。')
-        if scope['chat_reactions'] and not scope['chat']:
-            raise ValueError('消息表情回应需要开启持续群聊及发送权限。')
-        if any(scope[k] for k in CHAT_MEDIA_FLAGS) and not scope['chat']:
-            raise ValueError('表情包子功能需要开启持续群聊。')
-        if (scope['chat_sticker_send'] or scope['chat_sticker_collect']) and not scope['chat_images']:
-            raise ValueError('发送和收藏表情需要先允许持续聊天看图。')
+                     **{k: body.get(k, False) for k in ('media', 'prepare', 'voice', 'onebot', 'send', 'manage', 'chat', *CHAT_MEDIA_FLAGS, *CHAT_EXTRA_FLAGS, *QQ_FLAGS)})
+        self.validate_permissions(scope)
         if chat_account:scope['chat_account'] = chat_account
         token = secrets.token_urlsafe(32)
         gid = uuid.uuid4().hex
@@ -149,6 +158,70 @@ class MCPAccess:
             db.execute('INSERT INTO grants(id,name,token_hash,scope,epoch,accounts,created_at) VALUES(?,?,?,?,?,?,?)',
                        (gid, name.strip(), self.digest(token), json.dumps(scope), self.epoch(), json.dumps(self.accounts(platforms)), time.time()))
         return dict(id=gid, token=token)
+
+    @staticmethod
+    def validate_permissions(scope):
+        if any(scope.get(k) for k in QQ_FLAGS) and 'qq' not in scope['platforms']:
+            raise ValueError('SL 扩展权限需要选择 QQ 平台。')
+        if any(scope.get(k) for k in ATTACHMENT_FLAGS) and not scope.get('chat'):
+            raise ValueError('实时附件权限需要开启持续聊天及发送权限。')
+        if (scope.get('send') or scope.get('manage')) and 'qq' not in scope['platforms']:
+            raise ValueError('发送和群管理需要选择 QQ 平台。')
+        if scope.get('chat') and not scope.get('send'):
+            raise ValueError('持续聊天需要同时允许直接发送 QQ 消息。')
+        if scope.get('chat_reactions') and not scope.get('chat'):
+            raise ValueError('消息表情回应需要开启持续群聊及发送权限。')
+        if any(scope.get(k) for k in CHAT_MEDIA_FLAGS) and not scope.get('chat'):
+            raise ValueError('表情包子功能需要开启持续群聊。')
+        if (scope.get('chat_sticker_send') or scope.get('chat_sticker_collect')) and not scope.get('chat_images'):
+            raise ValueError('发送和收藏表情需要先允许持续聊天看图。')
+
+    def update_permissions(self, gid, body):
+        """Operator-only partial update. Keep the credential, source binding and scope bounds."""
+        if not isinstance(body, dict) or set(body)-{*PERMISSION_FLAGS, 'expected_revision'}:
+            raise ValueError('只可修改权限开关；连接名称、账号、会话范围和日期保持不变。')
+        changes = {k:v for k,v in body.items() if k in PERMISSION_FLAGS}
+        if any(type(v) is not bool for v in changes.values()):
+            raise ValueError('权限开关必须为布尔值。')
+        expected = body.get('expected_revision')
+        if 'expected_revision' in body and (type(expected) is not int or expected < 0):
+            raise ValueError('权限版本必须为非负整数。')
+        with self.connect() as db:
+            row = db.execute('SELECT * FROM grants WHERE id=? AND revoked=0', (gid,)).fetchone()
+        if not row:raise AccessDenied('连接不存在或已撤销，不能修改权限。')
+        if expected is not None and expected != row['revision']:
+            raise GrantConflict('权限已被其他操作修改，请刷新列表后重新编辑。')
+        old = json.loads(row['scope']);scope = old | changes
+        self.validate_permissions(scope)
+        changed = any(bool(old.get(k)) != v for k,v in changes.items())
+        if not changed:return dict(id=gid,scope=old,revision=row['revision'],changed=False)
+        enabled = {k for k,v in changes.items() if v and not old.get(k)}
+        # A reduction must work even when SL is offline. Enabling live QQ
+        # capabilities verifies the existing account and never rebinds a token.
+        live_flags = {'onebot','send','manage','chat',*CHAT_MEDIA_FLAGS,*CHAT_EXTRA_FLAGS,*QQ_FLAGS}
+        if enabled & live_flags and 'qq' in scope['platforms']:
+            from .onebot import Client
+            actual = Client(timeout=3).login()
+            bound = old.get('chat_account') or json.loads(row['accounts']).get('qq')
+            if bound and actual != bound:
+                raise AccessDenied('SL 登录账号与此连接原绑定账号不一致，未修改权限。')
+            for selection in scope['conversations']:
+                platform,cid = json.loads(selection)
+                if platform=='qq' and (':group:' in cid or ':direct:' in cid):
+                    if cid.split(':')[0] != actual:
+                        raise AccessDenied('会话所属账号与当前 SL 不一致，未修改权限。')
+            scope['chat_account'] = actual
+        with self.connect() as db:
+            updated = db.execute('UPDATE grants SET scope=?,revision=revision+1 WHERE id=? AND revoked=0 AND revision=?',
+                                 (json.dumps(scope),gid,row['revision'])).rowcount
+            if not updated:raise GrantConflict('权限或撤销状态已变化，请刷新列表后重新编辑。')
+        return dict(id=gid,scope=scope,revision=row['revision']+1,changed=True)
+
+    def ensure_revision(self, grant):
+        current = self.by_id(grant['id'], source=False)
+        if current.get('revision',0) != grant.get('revision',0):
+            raise AccessDenied('连接权限已修改，请刷新工具列表并重新开始本次操作。')
+        return current
 
     @staticmethod
     def digest(token):
@@ -190,7 +263,7 @@ class MCPAccess:
 
     def list(self):
         with self.connect() as db:
-            rows = [dict(r) for r in db.execute('SELECT id,name,scope,accounts,epoch,created_at,revoked FROM grants ORDER BY created_at DESC')]
+            rows = [dict(r) for r in db.execute('SELECT id,name,scope,accounts,epoch,created_at,revoked,revision FROM grants ORDER BY created_at DESC')]
             for row in rows:
                 row['scope'] = json.loads(row['scope'])
                 row['accounts'] = json.loads(row['accounts'])
@@ -206,7 +279,8 @@ class MCPAccess:
         with self.connect() as db:
             db.execute('BEGIN IMMEDIATE')
             limit = {'prepare_file': 12, 'download_file': 12, 'transcribe_voice': 12, 'read_image': 60,
-                     'read_chat_image':60,'read_chat_sticker':60,'collect_chat_sticker':12}.get(tool)
+                     'import_qq_media':30,'read_chat_attachment':60,
+                     'read_chat_image':60,'read_chat_sticker':60,'import_chat_image':60,'collect_chat_sticker':12}.get(tool)
             group = ('prepare_file','download_file') if tool in ('prepare_file','download_file') else ('read_chat_image','read_chat_sticker') if tool in ('read_chat_image','read_chat_sticker') else (tool,)
             if limit and db.execute('SELECT count(*) FROM calls WHERE grant_id=? AND tool IN ('+','.join('?' for _ in group)+') AND at>?',
                                     (gid, *group, time.time()-3600)).fetchone()[0] >= limit:

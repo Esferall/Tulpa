@@ -13,14 +13,16 @@ from .sync_state import now
 
 @contextmanager
 def _file_lock(name):
-    import msvcrt
-    path=ROOT/'.tmp'/name
-    with path.open('a+b') as handle:
-        handle.seek(0);handle.write(b'0');handle.flush();handle.seek(0)
-        try:msvcrt.locking(handle.fileno(),msvcrt.LK_NBLCK,1)
-        except OSError:raise ValueError('正在读取或导入数据，请稍后重试。') from None
-        try:yield
-        finally:handle.seek(0);msvcrt.locking(handle.fileno(),msvcrt.LK_UNLCK,1)
+    from .platform_lock import file_lock
+    lock = file_lock(ROOT/'.tmp'/name)
+    try:
+        lock.__enter__()
+    except OSError:
+        raise ValueError('正在读取或导入数据，请稍后重试。') from None
+    try:
+        yield
+    finally:
+        lock.__exit__(None, None, None)
 
 
 @contextmanager
@@ -103,7 +105,7 @@ def sync_messages(store, platforms=None, *, load_stickers=False, progress=None, 
                         for attempt in range(3):
                             read_started=time.perf_counter()
                             result=runner(command,cwd=ROOT,env=dict(os.environ,PYTHONUTF8='1',CHATLOCAL_SYNC_METRICS=str(folder/'metrics.json')),capture_output=True,
-                                text=True,encoding='utf-8',errors='replace',timeout=600,creationflags=subprocess.CREATE_NO_WINDOW)
+                                text=True,encoding='utf-8',errors='replace',timeout=600,creationflags=getattr(subprocess,'CREATE_NO_WINDOW',0))
                             timing['reader_seconds']=timing.get('reader_seconds',0)+time.perf_counter()-read_started
                             timing['attempts']=attempt+1
                             try:

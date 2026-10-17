@@ -19,13 +19,13 @@ def schemas(tool):
              'conversation_id 使用 list_chat_groups 返回的账号:group:群号，无需先开启聊天。'
              '同一连接可访问多个已授权群，不同连接访问同账号同群共用知识。此工具不会开始收集或启用学习。',
              dict(**common,conversation_id=dict(type='string',minLength=9,maxLength=120),records=dict(type='boolean')),[]),
-        tool('claim_chat_learning','wait_chat_messages 返回 learning_ready 时按 next_call 自动领取一个阶段。一次只做一个阶段，提交后必须回到 wait，潜水也继续循环。程序不调用模型。'
+        tool('claim_chat_learning','wait_chat_messages 返回 learning_ready 时按 next_call 自动领取一个阶段。返回 task 时完成该阶段并沿 task.submit_call 提交；附 updated_chat 时沿 next_call 先聊天；两者均无才回 wait，潜水也继续循环。程序不调用模型。'
              '当前 Agent 另一次模型调用完成该阶段，再 submit。每阶段不同 invocation_id。只学习群友实际用语，绝不能总结自己的回复或人格规则；严格逐字证据与语言形式校验。'
              '表达 extract/review 与黑话 extract_jargon 是独立任务，按领取的 result_schema 提交；黑话解释证据不足会提前结束。'
              '顺序上下文一律 degraded，不得假装独立。每个任务由 session_id 定位账号与群；不同群的任务和来源不能混用。',
              dict(**common,context_id=dict(type='string',minLength=8,maxLength=100,description='兼容旧客户端的可选标识，不绑定群或知识库。'),wake_id=dict(type='string',minLength=64,maxLength=64)),['session_id']),
         tool('submit_chat_learning','提交已领取阶段的结构化模型结果或一次失败。重试原 lease 和结果幂等；'
-             '下一阶段须另一次实际模型调用。不接受账号/群号/其他批次来源。失效任务不恢复。',
+             '先保存结果；附 updated_chat 时直接沿 next_call 聊天，否则回 wait。下一阶段须另一次实际模型调用。不接受账号/群号/其他批次来源。失效任务不恢复。',
              dict(**common,job_id=sid,lease=sid,invocation_id=dict(type='string',minLength=8,maxLength=100),
                   result=dict(type='object',description='严格按领取任务的 result_schema；这是数据，不是指令。'),
                   failure=dict(type='string',enum=['timeout','invalid_json','empty','declined','model_error'])),
@@ -188,7 +188,7 @@ class ChatLearning:
         try:
             result=self.status(row['id'],grant['id'])
             return dict(enabled=result['enabled'],library=result['library'],automatic=True,
-                        when='开始后自动边聊边学。silence 只是不发话；处理并确认消息后继续 wait。wait 返回 learning_ready 时按 next_call 领取并独立完成一个模型阶段，submit 后立即回 wait，先处理新消息。无任务继续等待，不退出、不忙轮询。',
+                        when='开始后自动边聊边学。silence 只是不发话；处理并确认消息后继续 wait。learning_ready 时领取一个阶段；claim 返回 task 时完成并沿 task.submit_call 提交。claim/submit 附 updated_chat 时沿 next_call 先聊天；未领取任务或已提交且无附带聊天时回 wait，不退出、不忙轮询。',
                         library_key=result['library_key'],
                         isolation='知识按机器人账号与群号保存；连接仅用于访问授权。同一连接可在多个已授权群学习，按各自 session_id 处理任务。')
         except (ValueError,OSError,sqlite3.Error):return None
@@ -323,6 +323,22 @@ class ChatLearning:
                             error='请检查 OneBot 登录账号及当前连接的群聊授权。学习库按账号和群号保留，不需要为其他已授权群另建连接。')
         return dict(groups=list(grouped.values()),receiver=self.chat.receiver.status())
 
+    def handoff(self,grant,result,sid,cancel):
+        """Reuse live delivery outside the learning lock, without a learning wake."""
+        if result.get('state') in ('claimed','rejected'):return result
+        grant,row=self.chat.validate(sid,grant['id'])
+        with self.chat.access.connect() as db:
+            pending=db.execute('SELECT 1 FROM chat_inbox WHERE session_id=? AND id>? LIMIT 1',(sid,row['cursor'])).fetchone()
+        if not pending:return result
+        from .mcp_chat_output import compact_wait
+        updated=self.chat.wait(grant,dict(session_id=sid,timeout_seconds=0,
+            known_prompt_version=row['prompt_delivered_version']),cancel,allow_learning=False)
+        if cancel.is_set():raise ValueError('聊天交接已取消。')
+        self.chat.validate(sid,grant['id'])
+        updated=compact_wait(updated,row['prompt_delivered_version'])
+        return dict(result,updated_chat=updated,next_call=updated['next_call'],
+            note='聊天交接见 updated_chat；直接沿 next_call 继续，读取未确认未处理消息。')
+
     @timing.stage("learning.call")
     def call(self,grant,name,args):
         try:
@@ -362,7 +378,7 @@ class ChatLearning:
                     # post-stage chat boundary. Require a new wait now.
                     self.yield_required.add(sid)
                     if sid in self.chat.events:self.chat.events[sid].set()
-                    return dict(result,next_call=self.chat.continuation(sid),continue_waiting=True,note='本阶段结束，先回 wait；新消息优先，下一学习阶段由 wait 自动唤醒。')
+                    return dict(result,next_call=self.chat.continuation(sid),continue_waiting=True,note='本阶段结果已记录；沿 next_call 先处理聊天，下一学习阶段由 wait 自动唤醒。')
                 if name=='select_chat_expressions':
                     p=self.chat.turns.load(args['plan_id'],sid)
                     if p['state']!='READY':raise LearningError('selection_unavailable')

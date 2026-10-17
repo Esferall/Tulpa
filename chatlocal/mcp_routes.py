@@ -188,9 +188,21 @@ def install_mcp_routes(app, store=None):
         from .onebot import Client
         try:
             client=Client(timeout=4); account=client.login()
-            rows=client.call('get_group_list', {})
+            rows=client.call('get_group_list', {'no_cache':True})
             return dict(items=[dict(platform='qq',conversation_id=f'{account}:group:{r["group_id"]}',name=str(r.get('group_name') or r['group_id']),count='OneBot')
                                for r in rows if isinstance(r,dict) and str(r.get('group_id','')).isdigit()])
+        except ValueError as exc:raise HTTPException(400,str(exc)) from None
+
+    @app.get('/api/mcp/live-friends')
+    def live_friends(request: Request):
+        local(request)
+        from .onebot import Client
+        try:
+            client=Client(timeout=4); account=client.login()
+            rows=client.call('get_friend_list', {})
+            return dict(items=[dict(platform='qq',conversation_id=f'{account}:direct:{r["user_id"]}',
+                                    name=str(r.get('remark') or r.get('nickname') or r['user_id']),count='OneBot')
+                               for r in rows if isinstance(r,dict) and str(r.get('user_id','')).isdigit()])
         except ValueError as exc:raise HTTPException(400,str(exc)) from None
 
     @app.get('/api/mcp/chats/{sid}/learning')
@@ -229,8 +241,8 @@ def install_mcp_routes(app, store=None):
             raise HTTPException(400)
         with store.connect() as db:
             rows = [dict(r) for r in db.execute('''SELECT platform,conversation_id,max(conversation) name,count(*) count
-                FROM messages WHERE instr(lower(conversation),lower(?))>0
-                GROUP BY platform,conversation_id ORDER BY platform,name LIMIT 81 OFFSET ?''', (query, offset))]
+                FROM messages WHERE instr(lower(conversation),lower(?))>0 OR instr(lower(conversation_id),lower(?))>0
+                GROUP BY platform,conversation_id ORDER BY platform,name LIMIT 81 OFFSET ?''', (query, query, offset))]
         return dict(items=rows[:80], has_more=len(rows)>80, next_offset=offset+80)
 
     return service

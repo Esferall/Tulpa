@@ -226,6 +226,21 @@ def main():
         ui_headers={'X-ChatWeave-UI':'1','Origin':'http://testserver'}
         with TestClient(app) as ui:
             assert not ui.get('/api/mcp').json()['enabled']
+            from chatlocal.onebot import Client
+            with patch.object(Client,'login',return_value='111'), patch.object(Client,'call') as catalog:
+                catalog.return_value=[dict(group_id=222,group_name='Current group'),dict(group_id='invalid')]
+                groups=ui.get('/api/mcp/live-groups').json()['items']
+                catalog.assert_called_once_with('get_group_list',{'no_cache':True})
+                assert [r['conversation_id'] for r in groups]==['111:group:222']
+                catalog.reset_mock()
+                catalog.return_value=[dict(user_id=333,remark='Friend remark',nickname='Nickname'),dict(user_id=444,nickname='Other friend'),dict(user_id='invalid')]
+                friends=ui.get('/api/mcp/live-friends').json()['items']
+                catalog.assert_called_once_with('get_friend_list',{})
+                assert [(r['conversation_id'],r['name']) for r in friends]==[('111:direct:333','Friend remark'),('111:direct:444','Other friend')]
+                assert ui.get('/api/mcp/live-friends',headers={'Origin':'https://evil.invalid'}).status_code==403
+                catalog.side_effect=ValueError('OneBot unavailable')
+                assert ui.get('/api/mcp/live-friends').status_code==400
+            assert ui.get('/api/mcp/conversations?query=course').json()['items'][0]['conversation_id']=='course'
             assert ui.put('/api/mcp',json=dict(enabled=True,port=port)).status_code==403
             assert ui.get('/api/mcp',headers={'Host':'evil.invalid'}).status_code==403
             base=dict(name='Fixture A',platforms=['qq'],conversations=[['qq','course']],start='2026-10-01',end='',media=False,prepare=False,voice=False,onebot=False)

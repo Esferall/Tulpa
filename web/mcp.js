@@ -17,7 +17,7 @@
           <label for="mcp-name">连接名称</label><input id="mcp-name" required maxlength="60" placeholder="例如：Codex 课程资料调查">
           <fieldset><legend>允许访问</legend><label><input id="mcp-qq" type="checkbox" checked> QQ</label><label><input id="mcp-wechat" type="checkbox" checked> 微信</label>
             <label class="mcp-all"><input id="mcp-all" type="checkbox">允许所选平台全部会话（包括以后入库的会话）</label>
-            <div id="mcp-picker"><label for="mcp-search">选择会话</label><input id="mcp-search" type="search" placeholder="搜索群名或联系人"><button id="mcp-live-groups" type="button">从 OneBot 选择群 · 无需导入</button><div id="mcp-chats" class="mcp-chats"></div><button id="mcp-more" type="button" hidden>更多会话</button><p id="mcp-selection" class="mcp-muted">已选择 0 个会话</p></div>
+            <div id="mcp-picker"><label for="mcp-source">会话来源</label><select id="mcp-source"><option value="history">已导入的历史会话</option><option value="groups">QQ 当前群聊 · 无需导入</option><option value="friends">QQ 当前好友私聊 · 无需导入</option></select><label for="mcp-search">选择会话</label><input id="mcp-search" type="search" placeholder="搜索名称或号码"><div id="mcp-chats" class="mcp-chats"></div><button id="mcp-more" type="button" hidden>更多会话</button><p id="mcp-selection" class="mcp-muted">已选择 0 个会话</p></div>
           </fieldset>
           <div class="mcp-dates"><label>开始日期<input id="mcp-start" type="date"></label><label>截止日期<input id="mcp-end" type="date"></label></div><small class="mcp-muted">留空表示不限制；截止日期包含当天。身份目录也遵守这个范围。</small>
           <fieldset><legend>按需处理权限</legend>
@@ -26,7 +26,7 @@
             <label><input id="mcp-voice" type="checkbox">本地转写语音（最多 12 次/小时）</label>
             <label><input id="mcp-onebot" type="checkbox">读取 OneBot 群公告、精华、当前成员和文件目录</label>
             <label><input id="mcp-send" type="checkbox">允许直接发送 QQ 消息（无需逐次审批）</label>
-            <label><input id="mcp-chat" type="checkbox">允许外部 Agent 持续群聊（需发送权限，可随时停止）</label>
+            <label><input id="mcp-chat" type="checkbox">允许外部 Agent 持续聊天（群聊 / 好友私聊，需发送权限，可随时停止）</label>
             <label><input id="mcp-chat_reactions" type="checkbox" disabled>允许对已读群消息添加 / 撤销小表情回应（无需逐次审批）</label>
             <small class="mcp-muted">与发送表情包独立，默认每会话冷却 10 秒。旧连接不会自动获得此权限。</small>
             <fieldset class="mcp-chat-media"><legend>持续群聊 · 表情包（可选）</legend>
@@ -65,7 +65,7 @@
     </div>`;
   document.body.append(dialog,chatDialog);
   const managedQQ=window.TulpaSnowLuma?.mount($('mcp-snowluma-managed'),{prefix:'mcp',onSaved:async()=>refresh()});
-  let current, credential=null, busy=false, createError='', platformsInitialized=false, selected = new Map(), page = 0, searchVersion = 0, searchTimer, chatTimer, chatRefreshing=false, liveGroups=null;
+  let current, credential=null, busy=false, createError='', platformsInitialized=false, selected = new Map(), page = 0, searchVersion = 0, searchTimer, chatTimer, chatRefreshing=false, liveConversations=null;
   async function api(path, method='GET', body) {
     let response,data;
     try{response=await fetch('/api/mcp'+path, {method, cache:'no-store', headers: {'Content-Type':'application/json','X-ChatWeave-UI':'1'}, body: body===undefined ? undefined : JSON.stringify(body)});}
@@ -92,7 +92,7 @@
     serviceState(await api(''));
     const counts=current.data_platforms||{};
     if(!platformsInitialized&&Object.keys(counts).length){for(const p of ['qq','wechat'])$('mcp-'+p).checked=!!counts[p];platformsInitialized=true;}
-    $('mcp-data-status').textContent=Object.keys(counts).length?Object.entries(counts).map(([p,n])=>(p==='qq'?'QQ':'微信')+' '+n.toLocaleString()+' 条本地消息').join(' · '):'历史查询需要导入资料；仅实时群聊可配置 OneBot 后直接选择群、授权，无需导入。';
+    $('mcp-data-status').textContent=Object.keys(counts).length?Object.entries(counts).map(([p,n])=>(p==='qq'?'QQ':'微信')+' '+n.toLocaleString()+' 条本地消息').join(' · '):'历史查询需要导入资料；实时聊天可配置 OneBot 后直接选择群或好友、授权，无需导入。';
     $('mcp-onebot-status').textContent=current.onebot_configured?'已保存 OneBot 配置；点击检测确认服务在线。':'OneBot 未配置，本地聊天查询仍可使用。公告、精华及群文件可稍后接入。';
     $('mcp-connections').replaceChildren();
     for (const row of current.connections) {
@@ -111,13 +111,24 @@
   function selection(){ $('mcp-selection').textContent='已选择 '+selected.size+' 个会话（搜索不会清除已选）'; }
   async function chats(reset=true) {
     const version=++searchVersion;if(reset){page=0;$('mcp-chats').replaceChildren();}
-    const data=liveGroups?{items:liveGroups.filter(r=>r.name.toLowerCase().includes($('mcp-search').value.toLowerCase())),has_more:false,next_offset:0}:await api('/conversations?'+new URLSearchParams({query:$('mcp-search').value,offset:page}));if(version!==searchVersion)return;
+    for(const option of $('mcp-source').options)if(option.value!=='history')option.disabled=!$('mcp-qq').checked;
+    if(!$('mcp-qq').checked&&$('mcp-source').value!=='history'){$('mcp-source').value='history';liveConversations=null;}
+    const source=$('mcp-source').value,query=$('mcp-search').value.toLowerCase();
+    let data;
+    if(source==='history')data=await api('/conversations?'+new URLSearchParams({query,offset:page}));
+    else{
+      const items=liveConversations||(await api('/live-'+source)).items;if(version!==searchVersion)return;
+      liveConversations=items;
+      data={items:items.filter(r=>(r.name+' '+r.conversation_id).toLowerCase().includes(query)),has_more:false,next_offset:0};
+    }
+    if(version!==searchVersion)return;
     for(const item of data.items){const pair=[item.platform,item.conversation_id],key=JSON.stringify(pair);const label=node('label','');
       const input=document.createElement('input');input.type='checkbox';input.checked=selected.has(key);
       input.disabled=!$(item.platform==='qq'?'mcp-qq':'mcp-wechat').checked;
       input.onchange=()=>{if(input.checked)selected.set(key,pair);else selected.delete(key);selection();};
-      label.append(input,node('span',item.platform+' · '+item.name+' ('+item.count+')'));$('mcp-chats').append(label);}
-    if(reset&&!data.items.length)$('mcp-chats').append(node('p','没有匹配的已导入会话。','mcp-muted'));
+      const detail=source==='history'?item.count+' 条历史消息':item.conversation_id.split(':').pop();
+      label.append(input,node('span',item.platform+' · '+item.name+' ('+detail+')'));$('mcp-chats').append(label);}
+    if(reset&&!data.items.length)$('mcp-chats').append(node('p',source==='history'?'没有匹配的已导入会话。':source==='friends'?'没有匹配的当前 QQ 好友。':'没有匹配的当前 QQ 群。','mcp-muted'));
     page=data.next_offset;$('mcp-more').hidden=!data.has_more;selection();
   }
   async function action(fn){$('mcp-error').textContent='';try{await fn();}catch(e){$('mcp-error').textContent=e.message;}}
@@ -219,14 +230,14 @@
   function watchChats(){clearInterval(chatTimer);if(dialog.open||chatDialog.open)chatTimer=setInterval(()=>{if(!document.hidden)void refreshChats();},3000);}
 
   async function desktop(path,method='GET',body){const r=await fetch('/api/desktop/'+path,{method,cache:'no-store',headers:{'Content-Type':'application/json','X-ChatWeave-UI':'1'},body:body===undefined?undefined:JSON.stringify(body)});const data=await r.json();if(!r.ok)throw Error(data.detail||'设置操作失败。');return data;}
-  $('open-mcp').onclick=()=>{if(!dialog.open)dialog.showModal();watchChats();void refreshChats();action(async()=>{await refresh();await chats();const [prefs,status]=await Promise.all([desktop('preferences'),desktop('status')]);$('mcp-background-label').hidden=!status.owned;$('mcp-background').checked=prefs.background;});};
+  $('open-mcp').onclick=()=>{liveConversations=null;if(!dialog.open)dialog.showModal();watchChats();void refreshChats();action(async()=>{await refresh();await chats();const [prefs,status]=await Promise.all([desktop('preferences'),desktop('status')]);$('mcp-background-label').hidden=!status.owned;$('mcp-background').checked=prefs.background;});};
   $('mcp-close').onclick=()=>dialog.close();
   $('mcp-operation-history').addEventListener('toggle',()=>{if($('mcp-operation-history').open)action(async()=>{const data=await api('/operations');const host=$('mcp-operations');host.replaceChildren();for(const row of data.operations){const card=node('div','', 'mcp-connection');card.append(node('strong',row.connection_name+' · '+row.state),node('pre',row.summary),node('p',row.result.note||''));host.append(card);}if(!data.operations.length)host.append(node('p','暂无操作记录。'));});});
   function clearSecret(){credential=null;for(const id of ['mcp-token','mcp-config'])$(id).value='';$('mcp-token').type='password';$('mcp-secret').hidden=true;}
   dialog.addEventListener('close',clearSecret);
   dialog.addEventListener('close',watchChats);
   chatDialog.addEventListener('close',watchChats);
-  $('mcp-live-groups').onclick=()=>action(async()=>{liveGroups=(await api('/live-groups')).items;$('mcp-qq').checked=true;if(!current?.data_platforms?.wechat)$('mcp-wechat').checked=false;await chats();});
+  $('mcp-source').onchange=()=>{liveConversations=null;action(()=>chats());};
   $('mcp-chat-open').onclick=()=>{if(!chatDialog.open)chatDialog.showModal();watchChats();void refreshChats();};
   $('mcp-chat-close').onclick=()=>chatDialog.close();
   $('mcp-chat-refresh').onclick=()=>void refreshChats();
@@ -265,7 +276,7 @@
       if(!body.all_conversations&&!body.conversations.length)throw Error('请选择会话，或明确勾选允许所选平台全部会话。');
       if(body.start&&body.end&&body.start>body.end)throw Error('截止日期不能早于开始日期。');
       const latest=await api('');serviceState(latest);
-      if(body.platforms.some(p=>!latest.data_platforms?.[p]&&!(p==='qq'&&body.chat&&body.send)))throw Error('请先导入所选平台的聊天；仅 QQ 持续群聊可直接通过 OneBot 授权。');
+      if(body.platforms.some(p=>!latest.data_platforms?.[p]&&!(p==='qq'&&body.chat&&body.send)))throw Error('请先导入所选平台的聊天；QQ 持续聊天可直接通过 OneBot 授权群或好友。');
       if(!current.running){
         if(!allowStart)throw Error('本机 MCP 服务尚未运行。请点击「开启服务并创建连接」继续。');
         if(!Number.isInteger(port)||port<1024||port>65535)throw Error('服务端口应为 1024 至 65535 的整数。');

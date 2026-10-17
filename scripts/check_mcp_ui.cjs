@@ -26,6 +26,7 @@ const html=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>MCP U
       }
       if(url.pathname==='/api/mcp/conversations')return reply({items:[{platform:'qq',conversation_id:'111:group:222',name:'测试会话',count:3}],has_more:false,next_offset:80});
       if(url.pathname==='/api/mcp/live-groups')return reply({items:[{platform:'qq',conversation_id:'111:group:444',name:'未导入的实时群',count:'OneBot'}]});
+      if(url.pathname==='/api/mcp/live-friends')return reply({items:[{platform:'qq',conversation_id:'111:direct:555',name:'未导入的好友',count:'OneBot'}]});
       if(url.pathname==='/api/desktop/preferences')return reply({background:false});
       if(url.pathname==='/api/desktop/status')return reply({owned:true});
       if(url.pathname==='/api/mcp/chats'&&method==='GET')return reply({sessions,receiver:{state:'connected',note:'SnowLuma 实时事件已连接。'}});
@@ -124,11 +125,37 @@ const html=`<!doctype html><html lang="zh-CN"><meta charset="utf-8"><title>MCP U
     await setup(true);await page.locator('#mcp-chat').check();await page.locator('#mcp-chat_reactions').check();await create();
     assert.equal(requests[0].body.chat_reactions,true);assert.equal(requests[0].body.chat_images,false);
     assert.ok((await page.locator('#mcp-config').inputValue()).includes('tools.react_to_chat_message'));
-    await setup(true);await page.locator('#mcp-all').uncheck();await page.locator('#mcp-live-groups').click();
+    await setup(true);await page.locator('#mcp-all').uncheck();await page.locator('#mcp-source').selectOption('groups');
     await waitText('mcp-chats','未导入的实时群');
     await page.locator('#mcp-search').fill('实时');await waitText('mcp-chats','未导入的实时群');
     await page.locator('#mcp-chats input').check();await page.locator('#mcp-chat').check();await create();
     assert.deepEqual(requests[0].body.conversations,[['qq','111:group:444']]);
+    // Live friend authorization needs neither imported messages nor all-chat access.
+    await setup(true);await page.locator('#mcp-all').uncheck();await page.locator('#mcp-wechat').uncheck();
+    await page.locator('#mcp-source').selectOption('friends');await waitText('mcp-chats','未导入的好友');
+    await page.locator('#mcp-search').fill('555');await waitText('mcp-chats','未导入的好友');
+    await page.locator('#mcp-chats input').check();await page.locator('#mcp-chat').check();
+    await page.locator('#mcp-settings').evaluate(e=>e.querySelector('#mcp-source').scrollIntoView({block:'center'}));await shot('13-live-friend-picker');
+    await page.setViewportSize({width:390,height:844});await shot('14-narrow-live-friend-picker');
+    assert.ok(await page.locator('#mcp-picker').evaluate(e=>e.scrollWidth<=e.clientWidth+1));
+    await page.setViewportSize({width:1100,height:920});
+    await page.locator('#mcp-search').fill('不存在');await waitText('mcp-chats','没有匹配的当前 QQ 好友');
+    await page.locator('#mcp-search').fill('');await waitText('mcp-chats','未导入的好友');
+    assert.equal(await page.locator('#mcp-chats input').isChecked(),true);
+    await page.locator('#mcp-source').selectOption('groups');await waitText('mcp-chats','未导入的实时群');
+    assert.equal(await page.locator('#mcp-chats').getByText('测试会话',{exact:false}).count(),0);
+    await page.locator('#mcp-source').selectOption('history');await waitText('mcp-chats','测试会话');
+    await page.locator('#mcp-source').selectOption('friends');await waitText('mcp-chats','未导入的好友');
+    await create();assert.deepEqual(requests[0].body.conversations,[['qq','111:direct:555']]);
+    assert.equal(requests[0].body.all_conversations,false);assert.equal(requests[0].body.send,true);
+    assert.equal(requests[0].body.qq_friends,undefined);
+    // Deselecting QQ cannot keep a live QQ source active or retain its selection.
+    await setup(true);await page.locator('#mcp-all').uncheck();await page.locator('#mcp-source').selectOption('friends');
+    await waitText('mcp-chats','未导入的好友');await page.locator('#mcp-chats input').check();
+    await page.locator('#mcp-qq').uncheck();await waitText('mcp-selection','已选择 0');
+    assert.equal(await page.locator('#mcp-source').inputValue(),'history');
+    assert.equal(await page.locator('#mcp-source option[value=friends]').isDisabled(),true);
+    await setup(true);
     // Display literal persona, preserve expanded details across polling, stop one/all.
     learning={enabled:true,independence:'degraded',library:{checked_expressions:4,known_jargon:0,observing_jargon:17,last_completed_at:null},run:{completed_batches:0,buffered:8},calls_last_hour:2,hourly_call_budget:20,expression_count:4,jargon_count:17,
       expressions:[{id:'synthetic-expression',situation:'<img src=x onerror=alert(1)> 合成适用场景',style:'合成抽象表达方式；长文本自动换行。'.repeat(8),count:1,enabled:true,independence:'degraded',evidence_version:2,surface_form:'不然{对象}？'}],jargon:[{id:'synthetic-word',term:'云朵开机',meaning:'',enabled:true,is_jargon:false,count:1,independence:'degraded'}]};

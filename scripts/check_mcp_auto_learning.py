@@ -140,6 +140,12 @@ def main():
                     with chat.learning.store.db() as db:assert db.execute('SELECT count(*) FROM batches').fetchone()[0]==1
                     began=time.perf_counter();wake=follow(link);wake_ms=(time.perf_counter()-began)*1000
                     assert wake['event']=='learning_ready' and wake['continue_waiting']
+                    # Chat arriving between wake and claim must win, without claiming or discarding a stage.
+                    receive(1,490)
+                    yielded=follow(wake['next_call'])
+                    assert yielded['state']=='no_task' and yielded['reason']=='chat_pending' and 'task' not in yielded
+                    assert yielded['next_call']['arguments']['timeout_seconds']==150
+                    link=silence(follow(yielded['next_call']));wake=follow(link)
                     t=follow(wake['next_call'])['task'];assert t['stage']=='extract'
                     assert follow(wake['next_call'])['state']=='no_task'
                     began=time.perf_counter();busy=follow(link);lease_ms=(time.perf_counter()-began)*1000
@@ -149,7 +155,8 @@ def main():
                     ids=[m['source_id'] for m in t['material']['messages']]
                     result=dict(expressions=[expression_fixture(t['material']['messages'][i],'情境'+str(i),'方式'+str(i)) for i in range(3)])
                     submitted=call('submit_chat_learning',**t['submit_call']['arguments'],invocation_id=key(),result=result)
-                    assert call('claim_chat_learning',session_id=sid)['reason']=='return_to_wait'
+                    assert call('claim_chat_learning',session_id=sid)['reason']=='chat_pending'
+                    assert submitted['next_call']['arguments']['timeout_seconds']==150
                     packet=follow(submitted['next_call']);assert packet['event']=='messages'
                     link=silence(packet);wake=follow(link);assert wake['event']=='learning_ready'
                     tj=follow(wake['next_call'])['task'];assert tj['stage']=='extract_jargon'

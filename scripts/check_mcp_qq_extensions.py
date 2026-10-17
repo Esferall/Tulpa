@@ -52,7 +52,7 @@ class Bot(BaseHTTPRequestHandler):
         elif action=='get_friend_list':data=[dict(user_id=u,nickname='Friend '+str(u),remark='') for u in (333,334)]
         elif action=='get_group_info':data=dict(group_id=args['group_id'],group_name='Fixture '+str(args['group_id']))
         elif action=='get_group_member_info':data=dict(group_id=args['group_id'],user_id=args['user_id'],role=self.role if args['user_id']==111 else 'member',nickname='Fixture')
-        elif action=='get_msg':data=deepcopy(self.history.get(args['message_id']))
+        elif action=='get_msg':data=deepcopy(self.history.get(int(args['message_id'])))
         elif action in ('get_group_msg_history','get_friend_msg_history'):data={'messages':list(deepcopy(self.history).values())}
         elif action=='get_record':data={'base64':base64.b64encode(audio()).decode(),'out_format':'wav'}
         elif action=='fetch_ptt_text':data={'text':'这是隔离测试语音'}
@@ -106,6 +106,66 @@ async def wire(service, grant, denied, raw):
     return aid
 
 
+async def private_materials(service, grant, sid, group_sid):
+    """Exercise shared local material delivery over real MCP for friend chats."""
+    chat=service.tools.chat
+    image=dict(type='image',data=dict(base64=base64.b64encode(fixture_image()).decode()))
+    stamp=int(time.time())
+    original=dict(post_type='message',message_type='private',sub_type='friend',self_id=111,
+                  user_id=333,sender=dict(user_id=333,nickname='Fixture'),time=stamp,message=[image])
+    # This original is absent from the inbox, so its identity must be verified.
+    Bot.history[9601]=original|dict(message_id=9601)
+    quoted=[dict(type='reply',data=dict(id='9601'))]
+    chat.receive(original|dict(message_id=9602,message=quoted))
+    Bot.history[9602]=original|dict(message_id=9602,message=quoted)
+    async with httpx.AsyncClient(headers={'Authorization':'Bearer '+grant['token']},trust_env=False,timeout=30) as http:
+        async with streamable_http_client(service.status()['url'],http_client=http) as (read,write,_):
+            async with ClientSession(read,write) as client:
+                await client.initialize()
+                async def get():
+                    result=await client.call_tool('get_chat_session',dict(session_id=sid))
+                    assert not result.isError,result
+                    return result
+                result=await get();data=result.structuredContent
+                item=next(m for m in data['context']['messages'] if m['onebot_message_id']=='9602')
+                detail=item['referenced_messages'][0]
+                assert detail['state']=='available' and detail['sender_id']=='333',detail
+                entry=next(e for e in data['materials']['images'] if e['event_id']==item['id'])
+                assert entry['state']=='pixels_delivered' and result.content[entry['content_indexes'][0]].type=='image'
+                assert chat.row(sid)['cursor']<item['id']
+                foreign=await client.call_tool('read_chat_image',dict(session_id=group_sid,event_id=item['id'],index=entry['image_index']))
+                assert foreign.isError
+                # Neither another friend nor a group message may be imported as a private quote.
+                for mid,extra in ((9603,dict(user_id=334,sender=dict(user_id=334))),
+                                  (9604,dict(message_type='group',group_id=222))):
+                    Bot.history[mid]=original|dict(message_id=mid)|extra
+                    chat.receive(original|dict(message_id=mid+10,message=[dict(type='reply',data=dict(id=str(mid)))]))
+                    result=await get()
+                    bad=next(m for m in result.structuredContent['context']['messages'] if m['onebot_message_id']==str(mid+10))
+                    assert bad['referenced_messages'][0]['state']=='unverified'
+                # Local direct images, forward-node images and stale updates share the same path.
+                forward=dict(type='forward',data=dict(nodes=[dict(sender=dict(user_id=333),time=stamp,content=[image])]))
+                chat.receive(original|dict(message_id=9620,message=[image,forward]))
+                result=await get()
+                item=next(m for m in result.structuredContent['context']['messages'] if m['onebot_message_id']=='9620')
+                entries=[e for e in result.structuredContent['materials']['images'] if e['event_id']==item['id']]
+                assert len(entries)==1 and entries[0]['state']=='pixels_delivered',entries
+                nested=item['referenced_messages'][0]['nodes'][0]['segments'][0]
+                assert nested['image_index']==item['segments'][0]['image_index']==entries[0]['image_index']
+                await asyncio.sleep(.12)
+                args=result.structuredContent['input_batch']['plan_call']['arguments']
+                plan=(await client.call_tool('plan_chat_reply',args|dict(action='reply',intent='private fixture',target_event_id=item['id'],expressions=['text']))).structuredContent
+                assert plan['state']=='READY',plan
+                chat.receive(original|dict(message_id=9621,message=[image]))
+                blocked=await client.call_tool('send_chat_reply',plan['next_call']['arguments']|dict(expression_ids=[],bubbles=[dict(kind='text',text='obsolete')]))
+                assert blocked.structuredContent['error_code']=='stale',blocked
+                updated=blocked.structuredContent['updated_chat']
+                assert updated['input_batch']['plan_call'] and any(e['state']=='pixels_delivered' for e in updated['materials']['images'])
+                chat.recall(dict(notice_type='friend_recall',self_id=111,user_id=333,message_id=9621))
+                result=await get()
+                assert next(m for m in result.structuredContent['context']['messages'] if m['onebot_message_id']=='9621')['recalled']
+
+
 def main():
     events=Events();upstream=ThreadingHTTPServer(('127.0.0.1',0),Bot)
     threading.Thread(target=upstream.serve_forever,daemon=True).start();checks=[]
@@ -133,6 +193,11 @@ def main():
                     tools.chat.learning.configure(sid,{'enabled':False})
                     def phase():
                         with access.connect() as db:db.execute('DELETE FROM calls')
+                    before=len(Bot.writes)
+                    asyncio.run(private_materials(service,g,private,sid))
+                    assert len(Bot.writes)==before
+                    phase()
+                    checks.append('private MCP pixels/quote/forward/stale/recall and cross-friend/group isolation; no dispatch or implicit ACK')
                     def send(s,bubble):
                         time.sleep(.12)
                         batch=data('get_chat_session',session_id=s)['input_batch']['id']
@@ -282,6 +347,32 @@ def main():
                         try:remote_target(url,trusted_file=True);raise AssertionError('private or foreign download address accepted')
                         except ValueError:pass
                     assert len(Bot.writes)==before
+                    # New attachment channels must share the same interrupted-tail guard.
+                    target=receive(9701,segments=[dict(type='text',data=dict(text='附件队列测试'))])
+                    time.sleep(.12)
+                    batch=data('get_chat_session',session_id=sid)['input_batch']['id']
+                    plan=data('plan_chat_reply',session_id=sid,batch_id=batch,action='reply',target_event_id=target,
+                        expressions=['file','voice'],intent='attachment queue fixture')
+                    def supplement(action,args):
+                        if action=='upload_group_file':receive(9702,segments=[dict(type='text',data=dict(text='补充更正'))])
+                    Bot.intercept=supplement;before=len(Bot.writes)
+                    queue=dict(session_id=sid,plan_id=plan['plan_id'],bubbles=[dict(kind='file',asset_id=file),dict(kind='voice',asset_id=voice)])
+                    try:interrupted=data('send_chat_reply',**queue)
+                    finally:Bot.intercept=None
+                    assert len(Bot.writes)==before+1 and interrupted['bubbles'][1]['state']=='CANCELLED',interrupted
+                    assert 'updated_chat' not in interrupted
+                    data('send_chat_reply',**queue)
+                    assert len(Bot.writes)==before+1
+                    uncertain_file=upload('file',b'unknown attachment fixture','unknown.txt')
+                    Bot.uncertain=True
+                    try:unknown,unknown_args=send(sid,dict(kind='file',asset_id=uncertain_file))
+                    finally:Bot.uncertain=False
+                    assert unknown['state']=='UNKNOWN',unknown
+                    before=len(Bot.writes)
+                    assert data('send_chat_reply',**unknown_args)['state']=='UNKNOWN'
+                    repeated,_=send(sid,dict(kind='file',asset_id=uncertain_file))
+                    assert repeated['state']=='UNKNOWN' and len(Bot.writes)==before
+                    checks.append('attachment queue supplement cancels tail; partial result has no auto-refresh; UNKNOWN survives new plan/key without dispatch')
                     Bot.account=777
                     assert call('qq_profile_action',action='set_self_longnick',params={'longNick':'changed'},idempotency_key='wrong-account').isError
                     Bot.account=111

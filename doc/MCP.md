@@ -83,7 +83,7 @@ OneBot 仅用于已授权 QQ 群。公告、精华和文件来源继续执行日
    > 在“测试群”持续聊天，直到我停止。人格提示词：说简短自然的中文，偶尔温和打趣，接得上话再说，不必每条都回复。参与程度：自然。
 
 5. Agent 用 `list_chat_groups` 核对实时群目录，调用 `start_chat_session`。可选 `participation` 为 `quiet` / `natural` / `active`。开始时上下文可能为空，后续最多附带本次会话收到的最近 20 条事件，不自动回放本地历史。
-6. 循环 `wait_chat_messages`，需要接话时用 `send_chat_message`，然后继续等待。`idle` 只结束一次等待；`source_unavailable` 表示事件通道异常，继续等待但暂停发言。每次等待最多 180 秒，群聊本身没有总时长限制。
+6. 循环 `wait_chat_messages`，需要接话时先 `plan_chat_reply`，READY 后 `send_chat_reply` 一并选择表达和发送，然后继续等待。`idle` 只结束一次等待；`source_unavailable` 表示事件通道异常，继续等待但暂停发言。正常及恢复等待默认 150 秒（接口仍允许显式选择最多 180 秒），群聊本身没有总时长限制。
 7. 随时在 Tulpa 点 **停止聊天** / **停止全部群聊**，或调用 `stop_chat_session`。停止立即唤醒等待者并阻止尚未派发的消息，其他工具仍可使用；已交给 QQ 的消息无法撤回。
 
 **外部 Agent 必须继续执行。** Tulpa 不代开推理，不在 Agent 结束任务后主动唤醒 Harness。中断后用 `list_chat_sessions` / `get_chat_session` 接续。界面分别显示外部 Agent 状态与 SnowLuma 接收状态；WebSocket 已连上但账号或 QQ 接收链路异常时不会当作正常在线。

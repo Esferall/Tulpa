@@ -6,6 +6,7 @@ import json
 from pathlib import Path
 import shutil
 import socket
+import ssl
 import sys
 import tempfile
 import threading
@@ -13,6 +14,10 @@ import time
 from unittest.mock import patch
 from websockets.sync.server import serve
 from websockets.exceptions import ConnectionClosed
+
+# Initialize Windows OpenSSL before fixtures clear environment credentials.
+# TLS verification stays enabled; no connection is made here.
+ssl.create_default_context()
 
 sys.path.insert(0,str(Path(__file__).resolve().parent))
 ROOT=Path(sys.argv[sys.argv.index('--package')+1]).resolve() if '--package' in sys.argv else Path(__file__).resolve().parents[1]
@@ -225,7 +230,8 @@ def main():
                     resumed=call('start_chat_session',**whale_args)
                 assert resumed['session']['id']==wid and resumed['chat_prompt']['persona']==whale['chat_prompt']['persona']
                 compact=call('wait_chat_messages',session_id=wid,timeout_seconds=1,known_prompt_version=whale['chat_prompt']['prompt_version'])
-                assert not compact['prompt_changed'] and 'chat_prompt' not in compact and compact['chat_guidance']['persona_name']=='小鲸鱼'
+                assert not compact['prompt_changed'] and 'chat_prompt' not in compact and 'persona_name' not in compact['chat_guidance']
+                assert compact['chat_guidance']['prompt_version']==whale['chat_prompt']['prompt_version']
                 refreshed=call('wait_chat_messages',session_id=wid,timeout_seconds=1,known_prompt_version='old-version')
                 assert refreshed['prompt_changed'] and refreshed['chat_prompt']['behavior']
                 assert not OneBot.sent,'Prompt setup sent messages'

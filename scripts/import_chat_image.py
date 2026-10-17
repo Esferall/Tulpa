@@ -68,7 +68,8 @@ def connection(path, server=None):
 def image_bytes(path):
     try:
         # Nonblocking open also rejects FIFOs/devices instead of waiting forever.
-        fd = os.open(Path(path).expanduser(), os.O_RDONLY | os.O_NONBLOCK)
+        flags = os.O_RDONLY | (os.O_NONBLOCK if os.name == 'posix' else os.O_BINARY)
+        fd = os.open(Path(path).expanduser(), flags)
         with os.fdopen(fd, 'rb') as stream:
             info = os.fstat(stream.fileno())
             if not stat.S_ISREG(info.st_mode) or not 0 < info.st_size <= MAX_BYTES:

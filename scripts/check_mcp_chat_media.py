@@ -21,6 +21,9 @@ import httpx
 from mcp import ClientSession
 from mcp.client.streamable_http import streamable_http_client
 from PIL import Image
+from types import SimpleNamespace
+import dns.message
+import dns.rrset
 from chatlocal.store import Store
 from chatlocal.mcp_routes import install_mcp_routes
 from chatlocal.mcp_chat_media import MEDIA_TOOLS, pixels, download, image_ref, public_addresses, MAX_BYTES
@@ -33,6 +36,12 @@ def fixture_image(animated=False):
     if animated:frames[0].save(out,'GIF',save_all=True,append_images=frames[1:],duration=150,loop=0)
     else:frames[0].save(out,'PNG')
     return out.getvalue()
+
+
+def dns_response(host,address):
+    response=dns.message.make_response(dns.message.make_query(host,'A'))
+    response.answer.append(dns.rrset.from_text(host.rstrip('.')+'.',60,'IN','A',address))
+    return dns.message.from_wire(response.to_wire())
 
 
 class StickerBot(OneBot):
@@ -74,12 +83,12 @@ def main():
     for url in ('file:///C:/secret','http://127.0.0.1/a','https://qq.com.evil.invalid/a','https://qpic.cn@evil.invalid/a'):
         try:download(url,threading.Event());raise AssertionError(url)
         except ValueError:pass
-    with patch('socket.getaddrinfo',return_value=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('127.0.0.1',443))]):
+    with patch('dns.resolver.Resolver.resolve_name',return_value=SimpleNamespace(addresses=lambda:['127.0.0.1'])):
         try:download('https://qq.com/a',threading.Event());raise AssertionError('private DNS accepted')
         except ValueError:pass
     for address in ('175.27.35.211','127.0.0.1'):
-        response=httpx.Client(transport=httpx.MockTransport(lambda request:httpx.Response(200,json={'Answer':[{'type':1,'data':address}]})),trust_env=False)
-        with patch('socket.getaddrinfo',return_value=[(socket.AF_INET,socket.SOCK_STREAM,6,'',('198.18.0.97',443))]),patch('chatlocal.mcp_chat_media.httpx.Client',return_value=response):
+        response=dns_response('multimedia.nt.qq.com.cn',address)
+        with patch('dns.resolver.Resolver.resolve_name',return_value=SimpleNamespace(addresses=lambda:['198.18.0.97'])),patch('dns.query.tls',return_value=response):
             if address.startswith('175.'):
                 assert public_addresses('multimedia.nt.qq.com.cn',443)[0][4][0]==address
             else:
@@ -168,11 +177,12 @@ def main():
                     assert data('collect_chat_sticker',**unknown)['state']=='UNKNOWN' and len(StickerBot.collected)==2
                     StickerBot.uncertain=False
                 # Stalled image requests cannot occupy ordinary tools, receive, or stop.
-                entered=threading.Barrier(3);release=threading.Event();eid=add(891)
-                def blocked(*args):entered.wait(3);release.wait(8);return animated
+                entered=threading.Event();release=threading.Event();eid=add(891)
+                def blocked(*args):entered.set();release.wait(8);return animated
                 with patch('chatlocal.mcp_chat_media.download',side_effect=blocked),ThreadPoolExecutor(2) as pool:
                     tasks=[pool.submit(call,'read_chat_image',session_id=sid,event_id=eid) for _ in range(2)]
-                    entered.wait(3)
+                    assert entered.wait(3)
+                    eventually(lambda:tools.chat.media.slots._value==0)
                     assert call('read_chat_image',session_id=sid,event_id=eid).structuredContent['error_code']=='media_busy'
                     began=time.monotonic();assert not call('get_data_status').isError;assert time.monotonic()-began<2
                     assert not call('send_chat_message',session_id=sid,text='ordinary still works',idempotency_key='ordinary-send').isError

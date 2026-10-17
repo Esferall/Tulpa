@@ -14,7 +14,7 @@ import time
 ROOT = Path(__file__).resolve().parent / 'prompts' / 'mcp_chat'
 BEHAVIOR = (ROOT / 'behavior.md').read_text('utf-8')
 EXAMPLES = json.loads((ROOT / 'examples.json').read_text('utf-8'))
-REVISION = 'group-chat-v1-' + hashlib.sha256((BEHAVIOR + json.dumps(EXAMPLES, ensure_ascii=False)).encode() + Path(__file__).read_bytes()).hexdigest()[:12]
+REVISION = 'group-chat-v2-' + hashlib.sha256((BEHAVIOR + json.dumps(EXAMPLES, ensure_ascii=False)).encode() + Path(__file__).read_bytes()).hexdigest()[:12]
 MAX_PERSONA_BYTES = 64 * 1024
 RESERVED_MARKDOWN = {'behavior.md', 'readme.md'}
 UNFINISHED = re.compile(r'(?:我跟你说|跟你讲|你知道吗|等一下|等下|但是|然后|还有|因为|不过|就是说|比如|所以|结果|：|:)[，,。\s]*$')
@@ -24,7 +24,7 @@ MODES = {
     'active': '可以主动接梗或顺着话题延伸；没人接你的上一句时先等，不连续换题刷屏。',
 }
 ADDRESSING = '''发言默认普通文本，不带引用或 @。reply_to_event_id 只记录你在回应哪条已读取事件；只有 quote=true 才显示引用。
-刚说完、对象明确的接话直接说；回复较早内容、话题被插开或多人交叉容易歧义时，再按语境选择引用。时间、间隔条数和发言人数只是参考，不设“超过几条必须引用”的阈值。
+刚说完、对象明确的接话直接说；回复较早内容、话题被插开或多人交叉容易歧义时，再按语境选择引用。Replyer 同一次组织正文时结合 quote_guidance 决定 quote：默认隔了至少3条其他人的消息建议引用，可按指代歧义覆盖，回应整个话题可不引用；不为了引用另读或等待。
 只有确实点名或向指定群友发问才传 mention_user_ids，使用已核实的 sender_id；不 @全体，不因引用就顺手 @作者。确实分别需要时可以同时引用与 @。
 一段话拆成多条通常只在首条指定引用或 @，后续省略这些参数自然接话；不会自动沿用上条标记。不要把统计、事件编号、CQ 代码或这段操作说明发进群。'''
 
@@ -208,7 +208,7 @@ def packet(row, recent, batch, *, event='messages', has_more=False, stickers=Non
     if not scope.get('chat_images'):
         hints.append('本连接未授权看图，图片只有占位，不据此猜画面。')
     elif state['image_events']:
-        hints.insert(0,'本批含图片占位。要接这张图的话，下一步先 read_chat_image 取得像素；没有实际看过，不能编图里的外观、动作或文字来接梗。表情笔记也不能替代这张图。')
+        hints.insert(0,'先看附带图片与 materials 映射，交付说明以 materials.note 为准；不以表情笔记或猜测代替实际像素。')
     if scope.get('chat_images'):
         # These instructions must also reach personas that skip selected_examples.
         hints.append('表情按语境选择：可以单发图、配文、纯文字或沉默，不凑发图次数。familiar_stickers 是本授权已看原件的哈希验证候选，可直接发送；没有合适的可 list_chat_stickers(source="library",query=关键词)，或查 QQ 收藏并先看未知图。')
@@ -251,6 +251,6 @@ def packet(row, recent, batch, *, event='messages', has_more=False, stickers=Non
     elif row.get('id'):
         result['image_reads'] = [dict(tool='read_chat_image',arguments=dict(session_id=row['id'],event_id=m['event_id'],index=m['index']))
                                  for m in state['image_events']] if scope.get('chat_images') else []
-        result['continue_with'] = dict(tool='wait_chat_messages', arguments=dict(session_id=row['id'],known_prompt_version=version(row)),
+        result['continue_with'] = dict(tool='wait_chat_messages', arguments=dict(session_id=row['id'],known_prompt_version=version(row),timeout_seconds=150),
             when='处理完这一批就实际调用；不发言也调用。已处理完时附 acknowledge_through_id=本批 read_through_id；用户停止则改用 stop_chat_session。')
     return result

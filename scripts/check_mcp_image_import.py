@@ -15,6 +15,8 @@ import tempfile
 import threading
 from unittest.mock import patch
 
+SUBPROCESS_ENV={k:os.environ[k] for k in ('SYSTEMROOT','WINDIR') if k in os.environ}
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 from check_mcp_chat_media import StickerBot, fixture_image
 from check_mcp_chat import Events, eventually, ROOT
@@ -221,8 +223,8 @@ def main():
                     image_path = root/'generated image.png'; image_path.write_bytes(raw)
                     config_path = root/'client.json'
                     config_path.write_text(json.dumps({'mcpServers':{'tulpa':{'url':service.status()['url'],'headers':{'Authorization':'Bearer '+g['token']}}}}))
-                    process = subprocess.run([sys.executable, str(ROOT/'scripts/import_chat_image.py'), '--config', str(config_path), '--session', sid, str(image_path)],
-                                             capture_output=True, text=True, timeout=30)
+                    process = subprocess.run([sys.executable, '-X', 'utf8', str(ROOT/'scripts/import_chat_image.py'), '--config', str(config_path), '--session', sid, str(image_path)],
+                                             capture_output=True, text=True, encoding='utf-8', timeout=30, env=dict(os.environ,**SUBPROCESS_ENV))
                     assert process.returncode == 0, process.stderr
                     result = json.loads(process.stdout)
                     assert result['sticker_id'] == aid and result['preview']['tool'] == 'read_chat_sticker'

@@ -17,6 +17,7 @@ and the source commit are recorded in `build-manifest.json`.
 | WebView2 SDK 1.0.4191.47 and Fixed Runtime 153.0.4234.48 | [Microsoft distribution terms](https://developer.microsoft.com/en-us/microsoft-edge/webview2/); SDK license in `licenses/`, runtime notices in `_internal/WebView2/` |
 | DeepSeek Harness SDK/runtime 0.1.5rc1 | [MIT](https://github.com/deepseek-ai/deepseek-harness/blob/master/LICENSE) |
 | websockets 15.0.1 | BSD-3-Clause; original LICENSE retained in package `.dist-info` |
+| dnspython 2.9.0 | [ISC](https://github.com/rthalley/dnspython/blob/v2.9.0/LICENSE); bounded DNS / TLS queries; original package notices retained |
 | MCP Python SDK 1.26.0 | [MIT](https://github.com/modelcontextprotocol/python-sdk/blob/v1.26.0/LICENSE); package license retained |
 | qq-bridge 群聊行为与小鲸鱼角色卡 | [MIT](https://github.com/Derpyu520/qq-bridge/blob/9df6a7e7fc5abcb36793337f778483bd442a3d2d/LICENSE); 小鲸鱼角色卡经 Tulpa 维护者按需改编，保留来源及许可；行为与工具协议单独适配，仅用于 MCP 持续群聊，见 `desktop/licenses/qq-bridge-MIT.txt`（发布包 `licenses/qq-bridge-MIT.txt`） |
 | QQ reader (`chatlog-keeper`) | [MIT](https://github.com/labazhou2024/chatlog-keeper/blob/b55675779e50edec913fab9d891e4185c8f7c9ac/LICENSE); commit `b55675779e50edec913fab9d891e4185c8f7c9ac` |

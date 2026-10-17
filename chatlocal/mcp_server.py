@@ -207,8 +207,9 @@ class MCPService:
                 return
             self.listener = listener
             self.error = ''
+            # Both servers share Uvicorn loggers; keep the WebUI's configuration.
             self.server = uvicorn.Server(uvicorn.Config(self.application(setting['port']), host='127.0.0.1',
-                port=setting['port'], log_level='critical', access_log=False, timeout_graceful_shutdown=3))
+                port=setting['port'], log_config=None, access_log=False, timeout_graceful_shutdown=3))
             def run():
                 try:
                     self.server.run(sockets=[listener])

@@ -50,6 +50,8 @@ class Store:
             columns={r[1] for r in db.execute('PRAGMA table_info(messages)')}
             if 'media_json' not in columns:db.execute("ALTER TABLE messages ADD COLUMN media_json TEXT NOT NULL DEFAULT '[]'")
             if 'reply_to' not in columns:db.execute('ALTER TABLE messages ADD COLUMN reply_to TEXT')
+            from .image_identity import initialize as initialize_image_ids
+            initialize_image_ids(db)
             from .reply_history import initialize as initialize_reply_history
             initialize_reply_history(db)
             if 'original_content' not in columns:db.execute('ALTER TABLE messages ADD COLUMN original_content TEXT')

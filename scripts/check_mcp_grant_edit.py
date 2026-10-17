@@ -4,6 +4,7 @@ import base64
 from concurrent.futures import ThreadPoolExecutor
 import io
 import json
+import os
 from pathlib import Path
 import sqlite3
 import subprocess
@@ -15,6 +16,8 @@ from unittest.mock import patch
 import uuid
 import wave
 
+SUBPROCESS_ENV={k:os.environ[k] for k in ('SYSTEMROOT','WINDIR') if k in os.environ}
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 sys.path.insert(0, str(ROOT/'scripts'))
@@ -24,6 +27,7 @@ from check_terminal_integration import management_http
 from chatlocal.mcp_access import MCPAccess, AccessDenied
 from chatlocal.mcp_qq import QQExtensions
 from chatlocal.onebot import Client, OneBotError
+from check_mcp_chat_media import fixture_image
 
 
 class GrantEditTests(unittest.TestCase):
@@ -64,6 +68,7 @@ class GrantEditTests(unittest.TestCase):
                        'scope TEXT NOT NULL,epoch TEXT NOT NULL,accounts TEXT NOT NULL,created_at REAL NOT NULL,revoked INTEGER NOT NULL DEFAULT 0)')
             fields = ('id','name','token_hash','scope','epoch','accounts','created_at','revoked')
             db.execute('INSERT INTO grants VALUES(?,?,?,?,?,?,?,?)', tuple(original[k] for k in fields))
+        db.close()
         migrated = MCPAccess(self.fixture.store, path=legacy)
         migrated.configure(True,18777)
         self.assertEqual(migrated.authorize(self.g['token'], source=False)['revision'], 0)
@@ -187,13 +192,55 @@ class GrantEditTests(unittest.TestCase):
         # The same credential can start a fresh session with the new permissions.
         self.assertNotEqual(self.start(),sid)
 
+    def test_local_material_delivery_stops_on_permission_edit(self):
+        self.edit(dict(chat_images=True))
+        chat=self.service.tools.chat
+        for mode in ('get_chat_session','wait_chat_messages','stale'):
+            sid=self.start()
+            def receive(mid):
+                chat.receive(dict(post_type='message',message_type='group',self_id=111,group_id=222,
+                    message_id=mid,user_id=333,sender=dict(user_id=333),time=int(time.time()),
+                    message=[dict(type='image',data=dict(base64=base64.b64encode(fixture_image()).decode()))]))
+            receive(9801)
+            if mode=='stale':
+                packet=self.data('get_chat_session',session_id=sid)
+                time.sleep(.12)
+                plan=self.data('plan_chat_reply',**packet['input_batch']['plan_call']['arguments'],
+                    action='reply',expressions=['text'],intent='permission fixture')
+                receive(9802)
+                name='send_chat_reply'
+                args=plan['next_call']['arguments']|dict(expression_ids=[],bubbles=[dict(kind='text',text='obsolete')])
+            else:
+                name=mode;args=dict(session_id=sid)
+                if mode=='wait_chat_messages':args.update(timeout_seconds=1,quiet_seconds=0)
+            entered=threading.Event();release=threading.Event();original=chat.media.event_image
+            def paused(*args,**kwargs):
+                entered.set()
+                if not release.wait(8):raise RuntimeError('fixture release timed out')
+                return original(*args,**kwargs)
+            with patch.object(chat.media,'event_image',paused),ThreadPoolExecutor(1) as pool:
+                future=pool.submit(self.service.tools.call,self.g['token'],name,args,threading.Event())
+                try:
+                    self.assertTrue(entered.wait(5),mode)
+                    current=self.access.by_id(self.g['id'],source=False)['scope'].get('qq_profile',False)
+                    self.assertTrue(self.edit(dict(qq_profile=not current))['changed'])
+                finally:release.set()
+                result=future.result(8)
+            self.assertTrue(result.isError,(mode,result))
+            self.assertFalse(any(c.type=='image' for c in result.content))
+            self.assertNotIn('updated_chat',result.structuredContent)
+            self.assertFalse(chat.row(sid)['active'])
+            self.assertEqual(chat.row(sid)['cursor'],0)
+            self.access.authorize(self.g['token'],source=False)
+        self.assertEqual(backend.SL.sent,[])
+
     def test_cli_and_native_route_keep_token(self):
         original_hash = self.row()['token_hash']
         with management_http(self.fixture.app) as url:
-            prefix = [str(ROOT/'tulpa'),'--json','--url',url,'--token-file',str(self.fixture.root/'data/terminal-admin.token'),
+            prefix = [sys.executable,'-X','utf8','-m','chatlocal.terminal_cli','--json','--url',url,'--token-file',str(self.fixture.root/'data/terminal-admin.token'),
                       'connections','edit',self.g['id']]
             for flag, expected in (('--qq-profile',True),('--no-qq-profile',False)):
-                result = subprocess.run(prefix+[flag],cwd=ROOT,capture_output=True,text=True,timeout=20)
+                result = subprocess.run(prefix+[flag],cwd=ROOT,capture_output=True,text=True,encoding='utf-8',timeout=20,env=dict(os.environ,**SUBPROCESS_ENV))
                 self.assertEqual(result.returncode,0,result.stderr)
                 output = json.loads(result.stdout)
                 self.assertEqual(output['scope']['qq_profile'],expected)
